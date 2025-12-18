@@ -10,17 +10,11 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 # ==================================================
 # 定数定義
 # ==================================================
-# Secretsからユーザー設定を読み込む
-# 事前に .streamlit/secrets.toml に [auth] セクションの設定が必要です
 try:
     auth_config = st.secrets["auth"]
     USER_LIST = auth_config["users"]
     ADMIN_TEAM_USERS = auth_config["admin_users"]
 except KeyError:
-    # 設定がない場合のフォールバック（またはエラー表示）
-    # アプリケーションが起動しなくなるのを防ぐため、まずは空リストで初期化し、
-    # ログイン処理部分でエラーを出す形も考えられますが、
-    # ここでは必須設定としてエラーを表示して停止させます。
     st.error("認証設定(secrets.toml)が読み込めません。[auth]セクションに users と admin_users を設定してください。")
     st.stop()
 
@@ -65,7 +59,6 @@ st.set_page_config(
 # ==================================================
 st.sidebar.header("ログイン")
 
-# URLパラメータからデフォルト値を取得
 qp = st.query_params
 default_user = qp.get("username", qp.get("user", ""))
 default_pass = qp.get("password", qp.get("pass", ""))
@@ -77,7 +70,6 @@ if user_name not in USER_LIST or password != st.secrets["auth"]["password"]:
     st.warning("登録されたユーザー名と正しいパスワードを入力してください")
     st.stop()
 
-# ロールバッジ表示
 if user_name in ADMIN_TEAM_USERS:
     st.sidebar.success("原作管理チーム")
 elif user_name in USER_LIST:
@@ -95,7 +87,7 @@ def init_supabase():
 
 supabase = init_supabase()
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=7200)
 def load_master_data():
     service_account_info = json.loads(
         st.secrets["gcp"]["service_account_json"]
@@ -111,20 +103,15 @@ def load_master_data():
 
     df = pd.DataFrame(data[1:], columns=data[0])
 
-    # ジャンルコードを日本語に変換
     if "genre" in df.columns:
-        # スプレッドシート等のデータは文字列になっていることが多いためastype(str)してから変換
-        # マッピングにない値（すでに日本語になっている場合など）は元の値を維持
         df["genre"] = df["genre"].astype(str).map(GENRE_MAP).fillna(df["genre"])
 
-    # 数値カラムの変換
     numeric_cols = ["global_point", "daily_point", "weekly_point", "monthly_point", 
                    "quarter_point", "yearly_point", "all_point", "general_all_no", 
                    "weekly_unique", "fav_novel_cnt", "impression_cnt", "review_cnt", "sasie_cnt", "kaiwaritu"]
     
     for col in numeric_cols:
         if col in df.columns:
-            # カンマ削除して数値化
             df[col] = df[col].astype(str).str.replace(",", "", regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
@@ -177,10 +164,8 @@ def save_rating(ncode, user_name, rating, comment, role):
         "updated_at": get_jst_now()
     }
     
-    # upsert: (ncode, user_name) unique
     supabase.table("user_ratings").upsert(data, on_conflict="ncode,user_name").execute()
     
-    # --- 高速化のためのローカルパッチ更新 ---
     if "local_rating_patches" not in st.session_state:
         st.session_state["local_rating_patches"] = {}
     
@@ -191,34 +176,19 @@ def save_rating(ncode, user_name, rating, comment, role):
         "updated_at": data["updated_at"]
     }
     
-    # キャッシュクリアは行わない
-    # load_user_ratings.clear()
-    # load_novel_ratings_all.clear()
-    # load_all_ratings_table.clear()
-    # get_processed_novel_data.clear()
-    # get_filtered_sorted_data.clear()
     
-    # コメント更新のみの場合はrerunしない（入力フィールカスが外れるため）
-    # ボタン押下時はrerunする
-    # この関数を呼ぶ側で制御する形にするため、ここではrerunしない
     return True
 
 def on_rating_button_click(ncode, user_name, target_rating, current_rating, role):
     """評価ボタン押下時のコールバック"""
-    # コメントは session_state から取得
-    # まだウィジェットが作られていない(rerun前)場合でも、前回のrunでの値が残っているはず
     comment = st.session_state.get(f"input_comment_area_{ncode}", "")
     
-    # トグルロジック
     new_rating = None if current_rating == target_rating else target_rating
     
-    # 保存（キャッシュクリア含む）
     save_rating(ncode, user_name, new_rating, comment, role)
-    # st.rerun() # コールバック内でのrerunは無効なため削除（ボタン押下後は自動で再実行される）
 
 def save_comment_only(ncode, user_name, comment, role):
     """コメントのみ保存（評価は維持）"""
-    # 現在の評価を取得
     current = load_user_ratings(user_name)
     current_rating = None
     if not current.empty:
@@ -226,8 +196,6 @@ def save_comment_only(ncode, user_name, comment, role):
         if not target.empty:
             current_rating = target.iloc[0]["rating"]
     
-    # 評価がない場合はコメントのみ保存できない（あるいはrating=Noneで保存？）
-    # 要件次第だが、とりあえずratingがあれば維持、なければNone
     
     data = {
         "ncode": ncode,
@@ -240,7 +208,6 @@ def save_comment_only(ncode, user_name, comment, role):
     
     supabase.table("user_ratings").upsert(data, on_conflict="ncode,user_name").execute()
     
-    # --- ローカルパッチ更新 ---
     if "local_rating_patches" not in st.session_state:
         st.session_state["local_rating_patches"] = {}
         
@@ -251,18 +218,12 @@ def save_comment_only(ncode, user_name, comment, role):
         "updated_at": data["updated_at"]
     }
 
-    # load_user_ratings.clear()
-    # load_novel_ratings_all.clear()
-    # load_all_ratings_table.clear()
-    # get_processed_novel_data.clear()
-    # get_filtered_sorted_data.clear()
 
 
 def determine_status(sub_df):
     """
     データフレーム（特定作品の評価一覧）からステータスフラグを判定する
     """
-    # フラグ初期化
     flags = {
         "is_ng": False,
         "is_admin_evaluated": False,
@@ -272,7 +233,6 @@ def determine_status(sub_df):
         "is_unclassified": False
     }
 
-    # ratingが有効なものだけ抽出（Noneや空文字を除外）
     valid_ratings_df = sub_df[sub_df["rating"].notna() & (sub_df["rating"] != "")]
     
     if valid_ratings_df.empty:
@@ -281,34 +241,26 @@ def determine_status(sub_df):
 
     ratings = set(valid_ratings_df["rating"].unique())
     
-    # 1. NGがあるか (最優先・排他)
     if "NG" in ratings:
         flags["is_ng"] = True
         return flags
     
-    # 2. 原作管理の判定
     admins_rated = valid_ratings_df[valid_ratings_df["user_name"].isin(ADMIN_TEAM_USERS)]
     if not admins_rated.empty:
         admin_ratings = set(admins_rated["rating"].unique())
-        # 〇か△が含まれているか
         if any(r in ["〇", "○", "△"] for r in admin_ratings):
             flags["is_admin_evaluated"] = True
         else:
-            # 残るは×のみ
             flags["is_admin_rejected"] = True
         
-    # 3. 一般編集の判定
     generals_rated = valid_ratings_df[valid_ratings_df["user_name"].isin(GENERAL_TEAM_USERS)]
     if not generals_rated.empty:
         gen_ratings = set(generals_rated["rating"].unique())
-        # 〇か△が含まれているか
         if any(r in ["〇", "○", "△"] for r in gen_ratings):
             flags["is_general_evaluated"] = True
         else:
-            # 残るは×のみ
             flags["is_general_rejected"] = True
 
-    # 4. どちらの評価もつかなかった場合
     if not any(flags.values()):
         flags["is_unclassified"] = True
 
@@ -323,19 +275,13 @@ def calculate_novel_status(df_ratings):
     if df_ratings.empty:
         return pd.DataFrame()
 
-    # 必要な列があるか確認
     if "role" not in df_ratings.columns:
-        # roleがない場合はmasterのUSER_LIST等から推測するか、空にする
-        # 現状のDB定義ではroleがあるはず
         pass
 
-    # グループ化して判定
-    # ncodeごとに処理
     results = []
     
     for ncode, group in df_ratings.groupby("ncode"):
         flags = determine_status(group)
-        # フラグを展開して辞書にする
         row = {"ncode": ncode}
         row.update(flags)
         results.append(row)
@@ -355,14 +301,12 @@ def get_processed_novel_data(user_name):
     df_ratings = load_user_ratings(user_name)
     df_all_ratings_raw = load_all_ratings_table()
     
-    # 結合計算
     df_classification = calculate_novel_status(df_all_ratings_raw)
 
     evaluated_ncodes = []
 
     if not df_classification.empty:
         df = pd.merge(df_master, df_classification, on="ncode", how="left")
-        # フラグの欠損値をFalseで埋める
         flag_cols = ["is_ng", "is_admin_evaluated", "is_admin_rejected", "is_general_evaluated", "is_general_rejected", "is_unclassified"]
         
         for col in flag_cols:
@@ -392,7 +336,6 @@ def get_processed_novel_data(user_name):
         df["my_rating"] = None
         df["my_comment"] = None
 
-    # 他者の評価を集計して結合
     if not df_all_ratings_raw.empty:
         others_df = df_all_ratings_raw[
             (df_all_ratings_raw["user_name"] != user_name) & 
@@ -409,13 +352,11 @@ def get_processed_novel_data(user_name):
     if "other_ratings_text" not in df.columns:
         df["other_ratings_text"] = None
 
-    # 念のため再度unclassified設定
     if len(evaluated_ncodes) > 0:
         df.loc[~df["ncode"].isin(evaluated_ncodes), "is_unclassified"] = True
     elif df_classification.empty:
         df["is_unclassified"] = True
 
-    # classificationカラム作成
     def get_disp_status(row):
         if row["is_ng"]: return "NG"
         if row["is_admin_evaluated"]: return "Admin〇△"
@@ -439,22 +380,16 @@ def apply_local_patches(df, user_name):
     patches = st.session_state["local_rating_patches"]
     df_patched = df.copy()
     
-    # 全評価データ（キャッシュ済み）を取得。これをベースに再計算する
     df_all_ratings = load_all_ratings_table()
     
     for ncode, patch in patches.items():
-        # 1. 自分の評価表示を更新
-        # ncodeがデータフレームに存在するか確認
         if ncode in df_patched["ncode"].values:
             idx = df_patched[df_patched["ncode"] == ncode].index
             df_patched.loc[idx, "my_rating"] = patch["rating"]
             df_patched.loc[idx, "my_comment"] = patch["comment"]
         
-        # 2. 分類ステータスの再計算
-        # その作品の全評価を取得
         novel_ratings = df_all_ratings[df_all_ratings["ncode"] == ncode].copy()
         
-        # 自分の評価行を探す
         my_row_idx = novel_ratings[novel_ratings["user_name"] == user_name].index
         
         new_row = {
@@ -467,25 +402,19 @@ def apply_local_patches(df, user_name):
         }
         
         if not my_row_idx.empty:
-            # 既存行を更新
             for k, v in new_row.items():
                 novel_ratings.loc[my_row_idx, k] = v
         else:
-            # 行がなければ追加（concat）
             novel_ratings = pd.concat([novel_ratings, pd.DataFrame([new_row])], ignore_index=True)
             
-        # ステータス判定
         flags = determine_status(novel_ratings)
         
-        # DFに反映
         if ncode in df_patched["ncode"].values:
             idx = df_patched[df_patched["ncode"] == ncode].index
             
-            # 各フラグ更新
             for flag_name, flag_val in flags.items():
                 df_patched.loc[idx, flag_name] = flag_val
             
-            # classification 文字列更新
             def get_disp_status_single(row):
                 if row["is_ng"]: return "NG"
                 if row["is_admin_evaluated"]: return "Admin〇△"
@@ -494,10 +423,6 @@ def apply_local_patches(df, user_name):
                 if row["is_general_rejected"]: return "Gen×"
                 return "-"
             
-            # applyではなくlocで更新した値を使って再計算したいので、
-            # 行データを取り出して関数に通す
-            # ただし行はDataFrame形式で返るため、applyを適用
-            # （locで書き換えた直後の値が反映されている前提）
             df_patched.loc[idx, "classification"] = df_patched.loc[idx].apply(get_disp_status_single, axis=1)
 
     return df_patched
@@ -506,7 +431,6 @@ def apply_local_patches(df, user_name):
 # ==================================================
 # UI
 # ==================================================
-# CSS注入
 st.markdown("""
 <style>
     /* 全体のフォント設定 */
@@ -578,7 +502,6 @@ st.markdown("""
 
 st.title("なろう小説 ダッシュボード")
 
-# マスタデータロード（これはキャッシュで早い）
 with st.spinner("データ読み込み中…"):
     df_master = load_master_data()
 
@@ -594,16 +517,13 @@ st.sidebar.caption("初回投稿日が2024年2月1日以降かつネトコン14�
 
 genres = ["すべて"]
 if "genre" in df_master.columns:
-    # データに含まれるジャンルのみ抽出
     existing_genres = set(df_master["genre"].dropna().unique())
     
-    # GENRE_MAPの定義順に並べる
     sorted_genres = []
     for g_val in GENRE_MAP.values():
         if g_val in existing_genres:
             sorted_genres.append(g_val)
     
-    # マップにないジャンルがあれば末尾に追加（念のため）
     others = sorted(list(existing_genres - set(sorted_genres)))
     
     genres += sorted_genres + others
@@ -623,7 +543,6 @@ max_global = st.sidebar.number_input("総合ポイント 未満", min_value=0, v
 # ==================================================
 st.sidebar.header("並び替え")
 
-# ソート用カラム定義 (表示名 -> カラム名)
 sort_map = {
     "総合評価ポイント": "global_point",
     "日間ポイント": "daily_point",
@@ -638,10 +557,8 @@ sort_map = {
     "週間ユニークユーザー数": "weekly_unique",
 }
 
-# 実際にデータフレームにあるカラムだけにする
 sort_map = {k: v for k, v in sort_map.items() if v in df_master.columns}
 
-# デフォルトを「日間ポイント」にする
 default_sort_index = 0
 if "日間ポイント" in sort_map:
     default_sort_index = list(sort_map.keys()).index("日間ポイント")
@@ -677,7 +594,6 @@ def render_novel_list(df_in, key_suffix):
         st.info("表示対象のデータがありません")
         return None
 
-    # ページネーション用Stateの初期化 (タブごとに独立管理)
     page_key = f"current_page_{key_suffix}"
     size_key = f"page_size_{key_suffix}"
 
@@ -688,31 +604,25 @@ def render_novel_list(df_in, key_suffix):
 
     PAGE_SIZE = st.session_state[size_key]
 
-    # 全体の件数
     total_count = len(df_in)
     total_pages = (total_count // PAGE_SIZE) + (1 if total_count % PAGE_SIZE > 0 else 0)
 
-    # ページ数が変わった場合の補正
     if st.session_state[page_key] > total_pages:
         st.session_state[page_key] = 1
 
-    # 現在のページのデータを取得
     start_idx = (st.session_state[page_key] - 1) * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
     display_df = df_in.iloc[start_idx:end_idx].copy()
 
-    # 日付列のフォーマット調整 (YYYY-MM-DDのみ表示)
     for col in ["general_firstup", "general_lastup"]:
         if col in display_df.columns:
             display_df[col] = display_df[col].astype(str).apply(lambda x: x.split(" ")[0])
 
-    # AgGridの設定
     gb = GridOptionsBuilder.from_dataframe(display_df)
     gb.configure_default_column(sortable=False)
     gb.configure_selection(selection_mode='single', use_checkbox=False)
     gb.configure_grid_options(domLayout='normal')
 
-    # カラム設定
     gb.configure_column("ncode", header_name="Nコード", width=150, sortable=True)
     gb.configure_column("title", header_name="タイトル", width=700, wrapText=True, autoHeight=True, sortable=True)
     gb.configure_column("userid", hide=True)
@@ -757,7 +667,6 @@ def render_novel_list(df_in, key_suffix):
     gb.configure_column("other_ratings_text", header_name="評価（他）", width=250)
     gb.configure_column("my_comment", hide=True)
 
-    # 内部管理用フラグカラムを非表示にする
     for col in ["is_ng", "is_admin_evaluated", "is_admin_rejected", "is_general_evaluated", "is_general_rejected", "is_unclassified"]:
         gb.configure_column(col, hide=True)
 
@@ -774,7 +683,6 @@ def render_novel_list(df_in, key_suffix):
         key=f'aggrid_{key_suffix}'
     )
 
-    # ページネーションコントロール
     if total_pages > 1:
         col_info, col_size, col_prev, col_page, col_next = st.columns([3, 2, 1, 2, 1])
         
@@ -782,7 +690,6 @@ def render_novel_list(df_in, key_suffix):
             st.caption(f"全 {total_count} 件中 {start_idx + 1} - {min(end_idx, total_count)} 件")
 
         with col_size:
-            # 現在のページサイズに対応するインデックスを取得
             try:
                 current_idx = [100, 300, 500].index(st.session_state[size_key])
             except ValueError:
@@ -819,7 +726,6 @@ def render_novel_list(df_in, key_suffix):
 
             st.button("次", key=f"next_{key_suffix}", disabled=(st.session_state[page_key] >= total_pages), use_container_width=True, on_click=next_page)
 
-    # 選択された行のNコードを返す
     selected = grid_response['selected_rows']
     if selected is not None and len(selected) > 0:
         if isinstance(selected, pd.DataFrame):
@@ -831,26 +737,21 @@ def render_novel_list(df_in, key_suffix):
 # ==================================================
 # タブによるリスト切り替え
 # ==================================================
-# @st.cache_data(ttl=300) # キャッシュを無効化し、パッチ適用を行う
 def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending):
     """
     フィルタリングとソートを行ったデータフレームを返す
     get_processed_novel_data（キャッシュ） + ローカルパッチ適用
     """
-    # 1. 重い処理（結合）済みのデータをキャッシュから取得
     df_base = get_processed_novel_data(user_name)
     
-    # 2. ローカルパッチ（未保存の評価変更）を適用
     df = apply_local_patches(df_base, user_name)
     
-    # フィルタリングのためコピーを作成（元のキャッシュを汚染しないため）
     if df is df_base:
         df = df.copy()
 
     # ==================================================
     # マスト条件: 「ネトコン14」を含む かつ 2024年2月1日以降
     # ==================================================
-    # 1. keyword カラムに指定のタグが含まれているか確認
     if "keyword" in df.columns:
         mask_netocon = (
             df["keyword"].fillna("").astype(str).str.contains("ネトコン14", case=False, na=False) |
@@ -858,12 +759,8 @@ def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, 
         )
         df = df[mask_netocon]
 
-    # 2. 初回掲載日が 2024-02-01 以降
     if "general_firstup" in df.columns:
-        # 日付型に変換して比較
         temp_date = pd.to_datetime(df["general_firstup"], errors='coerce')
-        # タイムゾーンが付いている場合は除去、あるいは単に日付だけで比較
-        # エラー（NaT）は除外
         df = df[temp_date >= "2024-02-01"]
 
     if genre != "すべて":
@@ -891,14 +788,11 @@ def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, 
             )
             df = df[~mask_exclude]
 
-    # ポイントフィルタ
-    # 0の場合はフィルタしない扱いにする
     if min_global is not None and min_global > 0:
         df = df[df["global_point"] >= min_global]
     if max_global is not None and max_global > 0:
         df = df[df["global_point"] < max_global]
 
-    # ソート適用
     if sort_col and sort_col in df.columns:
         df = df.sort_values(by=sort_col, ascending=is_ascending, na_position='last')
         
@@ -906,12 +800,9 @@ def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, 
 
 @st.fragment
 def main_content(user_name):
-    # フィルタ条件の準備
     target_col = sort_map.get(sort_col_label) if sort_col_label else None
     ascending = (sort_order == "昇順")
 
-    # フィルタリング済みデータを取得（キャッシュ化された関数を使用）
-    # これにより、AgGridの選択変更によるrerun時に重いフィルタリング処理をスキップできる
     df = get_filtered_sorted_data(
         user_name, 
         genre, 
@@ -923,7 +814,6 @@ def main_content(user_name):
         ascending
     )
 
-    # タブの定義（st.tabsはrerunで選択状態がリセットされるため、st.radioで代用）
     tab_options = [
         "すべて", 
         "未評価", 
@@ -934,7 +824,6 @@ def main_content(user_name):
         "NG（商業化済み／原作管理判定）"
     ]
 
-    # ラジオボタンをタブ風に表示するためのCSS
     st.markdown("""
     <style>
         /* ラジオボタンのコンテナ */
@@ -1013,46 +902,35 @@ def main_content(user_name):
 
     selected_ncode = None
 
-    # タブ1: すべて
     if current_tab == "すべて":
         ncode = render_novel_list(df, "all")
         if ncode: selected_ncode = ncode
 
-    # タブ2: 未評価
     elif current_tab == "未評価":
         target = df[df["is_unclassified"]]
         ncode = render_novel_list(target, "unclassified")
         if ncode: selected_ncode = ncode
 
-    # タブ3: ○／△（原作管理）
     elif current_tab == "○／△（原作管理）":
-        # Admin_Evaluated
         target = df[df["is_admin_evaluated"]]
         ncode = render_novel_list(target, "evaluated_team")
         if ncode: selected_ncode = ncode
 
-    # タブ4: ○／△（一般編集）
     elif current_tab == "○／△（一般編集）":
-        # General_Evaluated
         target = df[df["is_general_evaluated"]]
         ncode = render_novel_list(target, "evaluated_edit")
         if ncode: selected_ncode = ncode
 
-    # タブ5: ×（原作管理）
     elif current_tab == "×（原作管理）":
-        # Admin_Reject
         target = df[df["is_admin_rejected"]]
         ncode = render_novel_list(target, "rejected_team")
         if ncode: selected_ncode = ncode
 
-    # タブ6: ×（一般編集）
     elif current_tab == "×（一般編集）":
-        # General_Reject
         target = df[df["is_general_rejected"]]
         ncode = render_novel_list(target, "rejected_edit")
         if ncode: selected_ncode = ncode
 
-    # タブ7: NG（商業化済み／原作管理判定）
     elif current_tab == "NG（商業化済み／原作管理判定）":
         target = df[df["is_ng"]]
         ncode = render_novel_list(target, "ng_commercialized")
@@ -1064,10 +942,8 @@ def main_content(user_name):
 
     if selected_ncode is None:
         st.info("作品を一覧から選択してください")
-        # st.stop() # fragment内でstopすると全体が止まる可能性があるため、単にreturnする
         return
 
-    # 選択された作品のデータを取得
     row_df = df[df["ncode"] == selected_ncode]
     if row_df.empty:
         st.error("データが見つかりません")
@@ -1075,7 +951,6 @@ def main_content(user_name):
 
     row = row_df.iloc[0]
 
-    # 数値のフォーマット用ヘルパー
     def fmt_num(val, unit=""):
         try:
             if pd.isna(val) or val == "": return "-"
@@ -1086,9 +961,7 @@ def main_content(user_name):
         except:
             return str(val)
 
-    # 詳細表示（カード風デザイン）
     with st.container(border=True):
-        # ヘッダー部分
         st.markdown(f"## {row['title']}")
         
         narou_url = f"https://ncode.syosetu.com/{row['ncode'].lower()}/"
@@ -1125,10 +998,8 @@ def main_content(user_name):
 
 
 
-        # 2カラムレイアウト
         col_left, col_right = st.columns([1, 2], gap="large")
 
-        # 左カラム：属性情報 + アクションボタン
         with col_left:
             st.markdown(f"""
             <div style="margin-bottom: 10px;">
@@ -1144,7 +1015,6 @@ def main_content(user_name):
             </div>
             """, unsafe_allow_html=True)
 
-            # 統計情報をカラム分けして横並びに
             c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2], gap="small")
 
             with c1:
@@ -1166,7 +1036,6 @@ def main_content(user_name):
                 """, unsafe_allow_html=True)
 
             with c4:
-                # その他統計をドロップダウンで表示
                 with st.expander("その他統計"):
                     st.markdown(f"""
                     <div style="font-size: 0.8rem; line-height: 1.6; color: #555;">
@@ -1183,27 +1052,21 @@ def main_content(user_name):
             <div style="margin-bottom: 10px;">
             """, unsafe_allow_html=True)
             
-            # アクションボタン群
             st.markdown('<div class="label">評価アクション</div>', unsafe_allow_html=True)
             
-            # コメント初期値
             initial_comment = row.get("my_comment")
             if pd.isna(initial_comment): initial_comment = ""
             
             role = "原作管理チーム" if user_name in ADMIN_TEAM_USERS else "一般編集"
 
-            # ボタン群（上に配置）
             col_btn1, col_btn2 = st.columns(2)
             col_btn3, col_btn4 = st.columns(2)
 
-            # 現在の自分の評価を取得
             current_my_rating = row.get("my_rating")
-            # NaNチェック
             if pd.isna(current_my_rating):
                 current_my_rating = None
 
             with col_btn1:
-                # ○ ボタン
                 btn_type = "primary" if current_my_rating == "〇" else "secondary"
                 st.button(
                     "○ 面白い／コミカライズし易そう", 
@@ -1215,7 +1078,6 @@ def main_content(user_name):
                 )
             
             with col_btn2:
-                # △ ボタン
                 btn_type = "primary" if current_my_rating == "△" else "secondary"
                 st.button(
                     "△ 保留", 
@@ -1227,7 +1089,6 @@ def main_content(user_name):
                 )
 
             with col_btn3:
-                # × ボタン
                 btn_type = "primary" if current_my_rating == "×" else "secondary"
                 st.button(
                     "× 面白くない／しづらそう", 
@@ -1239,8 +1100,6 @@ def main_content(user_name):
                 )
 
             with col_btn4:
-                # NG ボタン
-                # 所属によってラベルを変更
                 ng_label = "NG（商業化済み／原作管理判定）" if role == "原作管理チーム" else "NG（商業化済み）"
                 
                 btn_type = "primary" if current_my_rating == "NG" else "secondary"
@@ -1253,12 +1112,10 @@ def main_content(user_name):
                     args=(row['ncode'], user_name, "NG", current_my_rating, role)
                 )
 
-            # コメント入力（下に配置）
             def on_comment_change():
                 new_comment = st.session_state[f"input_comment_area_{row['ncode']}"]
                 role_tmp = "原作管理チーム" if user_name in ADMIN_TEAM_USERS else "一般編集"
                 save_comment_only(row['ncode'], user_name, new_comment, role_tmp)
-                # st.toast("コメントを保存しました", icon="📝") # コールバック内での表示は警告が出るため削除
 
             input_comment = st.text_area(
                 "コメント", 
@@ -1270,7 +1127,6 @@ def main_content(user_name):
 
 
 
-        # 右カラム：あらすじ
         with col_right:
             st.markdown('<div class="label" style="margin-bottom: 8px;">あらすじ</div>', unsafe_allow_html=True)
             st.markdown(f"""
@@ -1282,7 +1138,6 @@ def main_content(user_name):
             st.subheader("評価者一覧")
             other_ratings_df = load_novel_ratings_all(row['ncode'])
 
-            # ローカルパッチの適用（即時反映）
             if "local_rating_patches" in st.session_state and row['ncode'] in st.session_state["local_rating_patches"]:
                 patch = st.session_state["local_rating_patches"][row['ncode']]
                 
@@ -1298,30 +1153,22 @@ def main_content(user_name):
                 if other_ratings_df.empty:
                     other_ratings_df = pd.DataFrame([new_row])
                 else:
-                    # 自分の行があるか確認
                     my_idx = other_ratings_df[other_ratings_df["user_name"] == user_name].index
                     if not my_idx.empty:
-                        # 更新
                         for k, v in new_row.items():
                             other_ratings_df.loc[my_idx, k] = v
                     else:
-                        # 追加
                         other_ratings_df = pd.concat([other_ratings_df, pd.DataFrame([new_row])], ignore_index=True)
 
             if not other_ratings_df.empty:
-                # 表示用にカラム調整
                 disp_ratings = other_ratings_df.copy()
                 if 'updated_at' in disp_ratings.columns:
-                    # タイムゾーンを考慮してJSTに変換してから日付部分を抽出
-                    # エラー防止のため coerce を指定し、かつ UTC として読み込んでから変換する
                     disp_ratings['updated_at'] = pd.to_datetime(disp_ratings['updated_at'], utc=True, errors='coerce').dt.tz_convert('Asia/Tokyo').dt.strftime('%Y-%m-%d %H:%M')
 
                 
-                # 必要なカラムのみ抽出（存在確認しつつ）
                 target_cols = ['user_name', 'rating', 'comment', 'updated_at']
                 disp_ratings = disp_ratings[[c for c in target_cols if c in disp_ratings.columns]]
                 
-                # カラム名変更
                 rename_map = {
                     'user_name': '名前',
                     'rating': '評価',
@@ -1346,5 +1193,4 @@ def main_content(user_name):
 
     st.write("") # 下部余白
 
-# メインコンテンツの表示
 main_content(user_name)
