@@ -1,0 +1,5 @@
+streamlit>=1.35.0
+pandas>=2.2.3
+gspread>=6.1.0
+supabase>=1.2.0
+st-aggrid>=5.1.0
