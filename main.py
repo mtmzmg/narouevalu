@@ -513,7 +513,7 @@ if df_master.empty:
 # フィルタ
 # ==================================================
 st.sidebar.header("絞り込み")
-st.sidebar.caption("初回投稿日が2024年2月1日以降かつ第14回ネット小説大賞の投稿作品を表示中")
+st.sidebar.caption("初回投稿日が2024年2月1日以降かつ第14回ネット小説大賞の投稿作のみ表示中")
 
 genres = ["すべて"]
 if "genre" in df_master.columns:
