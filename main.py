@@ -513,7 +513,7 @@ if df_master.empty:
 # フィルタ
 # ==================================================
 st.sidebar.header("絞り込み")
-st.sidebar.caption("初回投稿日が2024年2月1日以降かつネトコン14投稿作品のみ表示中")
+st.sidebar.caption("初回投稿日が2024年2月1日以降かつ第14回ネット小説大賞の作品を表示中")
 
 genres = ["すべて"]
 if "genre" in df_master.columns:
@@ -752,12 +752,6 @@ def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, 
     # ==================================================
     # マスト条件: 「ネトコン14」を含む かつ 2024年2月1日以降
     # ==================================================
-    if "keyword" in df.columns:
-        mask_netocon = (
-            df["keyword"].fillna("").astype(str).str.contains("ネトコン14", case=False, na=False) |
-            df["keyword"].fillna("").astype(str).str.contains("ネトコン１４", case=False, na=False)
-        )
-        df = df[mask_netocon]
 
     if "general_firstup" in df.columns:
         temp_date = pd.to_datetime(df["general_firstup"], errors='coerce')
