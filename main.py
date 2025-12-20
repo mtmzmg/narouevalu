@@ -635,7 +635,7 @@ def render_novel_list(df_in, key_suffix):
     gb.configure_grid_options(domLayout='normal')
 
     gb.configure_column("ncode", header_name="Nコード", width=150, sortable=True)
-    gb.configure_column("title", header_name="タイトル", width=700, wrapText=True, autoHeight=True, sortable=True)
+    gb.configure_column("title", header_name="タイトル", width=67670, wrapText=True, autoHeight=True, sortable=True)
     gb.configure_column("userid", hide=True)
     gb.configure_column("writer", header_name="著者", width=150, sortable=True)
     gb.configure_column("story", hide=True)
@@ -658,7 +658,7 @@ def render_novel_list(df_in, key_suffix):
     gb.configure_column("istensei", hide=True)
     gb.configure_column("istenni", hide=True)
     gb.configure_column("global_point", header_name="総合評価ポイント", width=190, filter=False, sortable=True)
-    gb.configure_column("daily_point", header_name="日間ポイント", width=120, filter=False, sortable=True)
+    gb.configure_column("daily_point", header_name="日間ポイント", width=150, filter=False, sortable=True)
     gb.configure_column("weekly_point", hide=True)
     gb.configure_column("monthly_point", hide=True)
     gb.configure_column("quarter_point", hide=True)
