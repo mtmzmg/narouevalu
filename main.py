@@ -658,7 +658,7 @@ def render_novel_list(df_in, key_suffix):
     gb.configure_column("istensei", hide=True)
     gb.configure_column("istenni", hide=True)
     gb.configure_column("global_point", header_name="総合評価ポイント", width=190, filter=False, sortable=True)
-    gb.configure_column("daily_point", hide=True)
+    gb.configure_column("daily_point", header_name="日間ポイント", width=120, filter=False, sortable=True)
     gb.configure_column("weekly_point", hide=True)
     gb.configure_column("monthly_point", hide=True)
     gb.configure_column("quarter_point", hide=True)
