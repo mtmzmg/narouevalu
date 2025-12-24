@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
-import gspread
-import json
 import time
+import os
+import duckdb
+import glob
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
@@ -89,19 +90,60 @@ supabase = init_supabase()
 
 @st.cache_data(ttl=7200)
 def load_master_data():
-    service_account_info = json.loads(
-        st.secrets["gcp"]["service_account_json"]
-    )
-    gc = gspread.service_account_from_dict(service_account_info)
-    sheet = gc.open_by_url(
-        st.secrets["gcp"]["sheet_url"]
-    ).sheet1
-
-    data = sheet.get_all_values()
-    if not data:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    parquet_pattern = os.path.join(base_dir, "narou_novels_part*.parquet")
+    
+    import glob
+    parquet_files = glob.glob(parquet_pattern)
+    if not parquet_files:
+        st.error(f"データファイルが見つかりません: {parquet_pattern}")
         return pd.DataFrame()
 
-    df = pd.DataFrame(data[1:], columns=data[0])
+    safe_files = [f.replace(os.sep, '/') for f in parquet_files]
+    
+    conn = duckdb.connect(database=':memory:')
+    
+    try:
+        escaped_files = [f.replace("'", "''") for f in safe_files]
+        file_list_str = ', '.join([f"'{f}'" for f in escaped_files])
+        
+        def cast_col(col):
+            return f"TRY_CAST(REPLACE(CAST({col} AS VARCHAR), ',', '') AS BIGINT) AS {col}"
+
+        query = f"""
+            SELECT 
+                ncode, title, userid, writer, biggenre, genre, gensaku, keyword,
+                general_firstup, general_lastup, novel_type, "end", 
+                {cast_col('general_all_no')},
+                length, "time", isstop, isr15, isbl, isgl, iszankoku, istensei, istenni,
+                {cast_col('global_point')},
+                {cast_col('daily_point')},
+                {cast_col('weekly_point')},
+                {cast_col('monthly_point')},
+                {cast_col('quarter_point')},
+                {cast_col('yearly_point')},
+                {cast_col('fav_novel_cnt')},
+                {cast_col('impression_cnt')},
+                {cast_col('review_cnt')},
+                {cast_col('all_point')},
+                {cast_col('all_hyoka_cnt')},
+                {cast_col('sasie_cnt')},
+                {cast_col('kaiwaritu')},
+                novelupdated_at, updated_at,
+                {cast_col('weekly_unique')}
+            FROM read_parquet([{file_list_str}])
+        """
+        
+        df = conn.execute(query).df()
+    except Exception as e:
+        st.error(f"データ読み込みエラー: {str(e)}")
+        st.error(f"読み込み対象ファイル数: {len(safe_files)}")
+        if safe_files:
+            st.error(f"最初のファイルパス: {safe_files[0]}")
+        conn.close()
+        return pd.DataFrame()
+    finally:
+        conn.close()
 
     if "genre" in df.columns:
         df["genre"] = df["genre"].astype(str).map(GENRE_MAP).fillna(df["genre"])
@@ -110,12 +152,105 @@ def load_master_data():
                    "quarter_point", "yearly_point", "all_point", "general_all_no", 
                    "weekly_unique", "fav_novel_cnt", "impression_cnt", "review_cnt", "sasie_cnt", "kaiwaritu"]
     
-    for col in numeric_cols:
+    df[numeric_cols] = df[numeric_cols].fillna(0)
+
+    date_cols = ["general_firstup", "general_lastup", "novelupdated_at", "updated_at"]
+    for col in date_cols:
         if col in df.columns:
-            df[col] = df[col].astype(str).str.replace(",", "", regex=False)
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            df[col] = pd.to_datetime(df[col], errors='coerce')
 
     return df
+
+@st.cache_data(ttl=3600)
+def load_novel_story(ncode):
+    """指定されたNコードのあらすじのみを取得する"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    parquet_pattern = os.path.join(base_dir, "narou_novels_part*.parquet")
+    
+    import glob
+    parquet_files = glob.glob(parquet_pattern)
+    if not parquet_files:
+        return "情報なし"
+    
+    safe_files = [f.replace(os.sep, '/') for f in parquet_files]
+    file_list_str = ', '.join([f"'{f}'" for f in safe_files])
+    
+    query = f"SELECT story FROM read_parquet([{file_list_str}]) WHERE ncode = ?"
+    
+    try:
+        conn = duckdb.connect(database=':memory:')
+        result = conn.execute(query, [ncode]).fetchone()
+        conn.close()
+        
+        if result:
+            return result[0]
+    except Exception as e:
+        return f"あらすじ取得エラー: {str(e)}"
+        
+    return "情報なし"
+
+@st.cache_data(ttl=300)
+def search_ncodes_by_duckdb(search_keyword_str, exclude_keyword_str):
+    """
+    DuckDBを使ってParquetファイルから高速に検索を行い、
+    条件に合致するNコードのリストを返す。
+    メモリに全データを展開せずにあらすじ検索が可能。
+    """
+    if not search_keyword_str and not exclude_keyword_str:
+        return None
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    parquet_pattern = os.path.join(base_dir, "narou_novels_part*.parquet")
+    
+    import glob
+    parquet_files = glob.glob(parquet_pattern)
+    if not parquet_files:
+        return None
+    
+    safe_files = [f.replace(os.sep, '/') for f in parquet_files]
+    file_list_str = ', '.join([f"'{f}'" for f in safe_files])
+    
+    query_parts = [f"SELECT ncode FROM read_parquet([{file_list_str}]) WHERE 1=1"]
+    params = []
+    
+    if search_keyword_str:
+        keywords = search_keyword_str.replace("　", " ").split()
+        for k in keywords:
+            query_parts.append("""
+                AND (
+                    title ILIKE ? OR 
+                    writer ILIKE ? OR 
+                    story ILIKE ? OR 
+                    keyword ILIKE ?
+                )
+            """)
+            p = f"%{k}%"
+            params.extend([p, p, p, p])
+
+    if exclude_keyword_str:
+        ex_keywords = exclude_keyword_str.replace("　", " ").split()
+        for k in ex_keywords:
+            query_parts.append("""
+                AND NOT (
+                    title ILIKE ? OR 
+                    writer ILIKE ? OR 
+                    story ILIKE ? OR 
+                    keyword ILIKE ?
+                )
+            """)
+            p = f"%{k}%"
+            params.extend([p, p, p, p])
+            
+    full_query = " ".join(query_parts)
+    
+    try:
+        conn = duckdb.connect(database=':memory:')
+        result = conn.execute(full_query, params).fetchall()
+        conn.close()
+        return [r[0] for r in result]
+    except Exception as e:
+        st.error(f"検索エラー: {e}")
+        return []
 
 @st.cache_data(ttl=300)
 def load_user_ratings(user_name):
@@ -269,24 +404,48 @@ def determine_status(sub_df):
 
 def calculate_novel_status(df_ratings):
     """
-    全評価データから作品ごとの分類ステータスを算出
+    全評価データから作品ごとの分類ステータスを算出（ベクトル化による高速版）
     優先度: NG > 原作管理× > ○ > △ > ×
     """
     if df_ratings.empty:
         return pd.DataFrame()
 
-    if "role" not in df_ratings.columns:
-        pass
+    valid_mask = df_ratings["rating"].notna() & (df_ratings["rating"] != "")
+    df_valid = df_ratings[valid_mask].copy()
 
-    results = []
+    if df_valid.empty:
+        return pd.DataFrame()
+
+    df_valid["is_ng_flag"] = df_valid["rating"] == "NG"
     
-    for ncode, group in df_ratings.groupby("ncode"):
-        flags = determine_status(group)
-        row = {"ncode": ncode}
-        row.update(flags)
-        results.append(row)
-        
-    return pd.DataFrame(results)
+    is_admin = df_valid["user_name"].isin(ADMIN_TEAM_USERS)
+    is_general = df_valid["user_name"].isin(GENERAL_TEAM_USERS)
+    
+    is_positive = df_valid["rating"].isin(["〇", "○", "△"])
+    
+    df_valid["admin_pos"] = is_admin & is_positive
+    df_valid["admin_neg"] = is_admin & ~is_positive & ~df_valid["is_ng_flag"]
+    
+    df_valid["gen_pos"] = is_general & is_positive
+    df_valid["gen_neg"] = is_general & ~is_positive & ~df_valid["is_ng_flag"]
+    
+    grouped = df_valid.groupby("ncode")[["is_ng_flag", "admin_pos", "admin_neg", "gen_pos", "gen_neg"]].any()
+    
+    result = pd.DataFrame(index=grouped.index)
+    result["ncode"] = grouped.index
+    
+    result["is_ng"] = grouped["is_ng_flag"]
+    
+    result["is_admin_evaluated"] = grouped["admin_pos"]
+    result["is_admin_rejected"] = grouped["admin_neg"] & ~grouped["admin_pos"]
+    
+    result["is_general_evaluated"] = grouped["gen_pos"]
+    result["is_general_rejected"] = grouped["gen_neg"] & ~grouped["gen_pos"]
+    
+    ng_mask = result["is_ng"]
+    result.loc[ng_mask, ["is_admin_evaluated", "is_admin_rejected", "is_general_evaluated", "is_general_rejected"]] = False
+    
+    return result.reset_index(drop=True)
 
 
 
@@ -497,6 +656,18 @@ st.markdown("""
         font-size: 0.95rem;
         border-left: 4px solid #3498db;
     }
+    
+    /* チェックボックスを黒に */
+    div[data-testid="stSidebar"] div[data-testid="stCheckbox"]:has(input[id*="filter_netcon14"]) input[type="checkbox"]:checked {
+        background-color: #000000 !important;
+        border-color: #000000 !important;
+    }
+    div[data-testid="stSidebar"] div[data-testid="stCheckbox"]:has(input[id*="filter_netcon14"]) input[type="checkbox"] {
+        border-color: #000000 !important;
+    }
+    div[data-testid="stSidebar"] div[data-testid="stCheckbox"]:has(input[id*="filter_netcon14"]) input[type="checkbox"]:checked::after {
+        border-color: #ffffff !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -504,39 +675,11 @@ st.title("なろう小説 ダッシュボード")
 
 with st.spinner("データ読み込み中…"):
     df_master = load_master_data()
+    st.session_state["data_loaded"] = True
 
 if df_master.empty:
     st.error("マスタデータが取得できません")
     st.stop()
-
-# ==================================================
-# フィルタ
-# ==================================================
-st.sidebar.header("絞り込み")
-st.sidebar.caption("初回投稿日が2024年2月1日以降かつ第14回ネット小説大賞の投稿作のみ表示中")
-
-genres = ["すべて"]
-if "genre" in df_master.columns:
-    existing_genres = set(df_master["genre"].dropna().unique())
-    
-    sorted_genres = []
-    for g_val in GENRE_MAP.values():
-        if g_val in existing_genres:
-            sorted_genres.append(g_val)
-    
-    others = sorted(list(existing_genres - set(sorted_genres)))
-    
-    genres += sorted_genres + others
-
-genre = st.sidebar.selectbox("ジャンル", genres)
-
-search_keyword = st.sidebar.text_input("キーワード検索")
-exclude_keyword = st.sidebar.text_input("検索除外ワード")
-
-st.sidebar.markdown("---")
-st.sidebar.caption("ポイントフィルタ")
-min_global = st.sidebar.number_input("総合ポイント 以上", min_value=0, value=0, step=1000)
-max_global = st.sidebar.number_input("総合ポイント 未満", min_value=0, value=0, step=1000)
 
 # ==================================================
 # 並び替え (Python側で実行)
@@ -565,9 +708,71 @@ if "日間ポイント" in sort_map:
 elif "総合評価ポイント" in sort_map:
     default_sort_index = list(sort_map.keys()).index("総合評価ポイント")
 
-sort_col_label = st.sidebar.selectbox("ソート項目", list(sort_map.keys()), index=default_sort_index)
-sort_order = st.sidebar.radio("順序", ["降順", "昇順"], index=0)
+sort_col_label = st.sidebar.selectbox("", list(sort_map.keys()), index=default_sort_index, label_visibility="collapsed")
+if st.session_state.get("data_loaded", False):
+    sort_order = st.sidebar.radio("", ["降順", "昇順"], index=0, horizontal=True, label_visibility="collapsed")
+else:
+    if "sort_order" not in st.session_state:
+        st.session_state["sort_order"] = "降順"
+    sort_order = st.session_state["sort_order"]          
 
+# ==================================================
+# フィルタ
+# ==================================================
+st.sidebar.header("絞り込み")
+
+genres = ["すべて"]
+if "genre" in df_master.columns:
+    existing_genres = set(df_master["genre"].dropna().unique())
+    
+    sorted_genres = []
+    for g_val in GENRE_MAP.values():
+        if g_val in existing_genres:
+            sorted_genres.append(g_val)
+    
+    others = sorted(list(existing_genres - set(sorted_genres)))
+    
+    genres += sorted_genres + others
+
+genre = st.sidebar.selectbox("ジャンル", genres)
+
+col_check, col_label = st.sidebar.columns([0.15, 0.85])
+with col_check:
+    filter_netcon14 = st.checkbox("", value=True, key="filter_netcon14", label_visibility="collapsed")
+with col_label:
+    st.markdown('<p style="font-size: 0.8em; color: #666; margin-top: 0.5rem; margin-bottom: 0; text-align: left;">第14回ネット小説大賞応募作品を表示</p>', unsafe_allow_html=True)
+
+search_keyword = st.sidebar.text_input("キーワード検索")
+exclude_keyword = st.sidebar.text_input("検索除外ワード")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("ポイントフィルタ")
+min_global = st.sidebar.number_input("総合ポイント 以上", min_value=0, value=0, step=1000)
+max_global = st.sidebar.number_input("総合ポイント 未満", min_value=0, value=0, step=1000)
+
+st.sidebar.markdown("---")
+st.sidebar.caption("日付フィルタ")
+st.sidebar.text("初回掲載日")
+col1, col2, col3 = st.sidebar.columns([2.5, 0.3, 2.5])
+with col1:
+    firstup_from = st.date_input("開始", value=datetime(2024, 2, 1).date(), key="firstup_from", label_visibility="collapsed")
+with col2:
+    st.markdown("<div style='text-align: center; padding-top: 0.5rem;'>～</div>", unsafe_allow_html=True)
+with col3:
+    firstup_to = st.date_input("終了", value=None, key="firstup_to", label_visibility="collapsed")
+st.sidebar.text("最終掲載日")
+col4, col5, col6 = st.sidebar.columns([2.5, 0.3, 2.5])
+with col4:
+    lastup_from = st.date_input("開始", value=None, key="lastup_from", label_visibility="collapsed")
+with col5:
+    st.markdown("<div style='text-align: center; padding-top: 0.5rem;'>～</div>", unsafe_allow_html=True)
+with col6:
+    lastup_to = st.date_input("終了", value=None, key="lastup_to", label_visibility="collapsed")
+st.sidebar.caption("※初回掲載日が2024年2月1日以降の作品のみ対応")
+
+# ==================================================
+# データエクスポート
+# ==================================================
 st.sidebar.markdown("---")
 with st.sidebar.expander("ヘルプ"):
     st.markdown("""
@@ -595,11 +800,6 @@ with st.sidebar.expander("ヘルプ"):
     ○＞△＞×
     </div>
     """, unsafe_allow_html=True)
-
-# ==================================================
-# データエクスポート
-# ==================================================
-st.sidebar.markdown("---")
 
 df_export_base = get_processed_novel_data(user_name)
 df_export = apply_local_patches(df_export_base, user_name)
@@ -725,7 +925,10 @@ def render_novel_list(df_in, key_suffix):
 
     for col in ["general_firstup", "general_lastup"]:
         if col in display_df.columns:
-            display_df[col] = display_df[col].astype(str).apply(lambda x: x.split(" ")[0])
+            if pd.api.types.is_datetime64_any_dtype(display_df[col]):
+                display_df[col] = display_df[col].dt.strftime('%Y-%m-%d').fillna("-")
+            else:
+                display_df[col] = display_df[col].astype(str).apply(lambda x: x.split(" ")[0])
 
     gb = GridOptionsBuilder.from_dataframe(display_df)
     gb.configure_default_column(sortable=False)
@@ -736,7 +939,8 @@ def render_novel_list(df_in, key_suffix):
     gb.configure_column("title", header_name="タイトル", width=670, wrapText=True, autoHeight=True, sortable=True)
     gb.configure_column("userid", hide=True)
     gb.configure_column("writer", header_name="著者", width=150, sortable=True)
-    gb.configure_column("story", hide=True)
+    if "story" in display_df.columns:
+        gb.configure_column("story", hide=True)
     gb.configure_column("biggenre", hide=True)
     gb.configure_column("genre", header_name="ジャンル", width=170, sortable=True)
     gb.configure_column("gensaku", hide=True)
@@ -846,7 +1050,7 @@ def render_novel_list(df_in, key_suffix):
 # ==================================================
 # タブによるリスト切り替え
 # ==================================================
-def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending):
+def get_filtered_sorted_data(user_name, genre, filter_netcon14, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending, firstup_from=None, firstup_to=None, lastup_from=None, lastup_to=None):
     """
     フィルタリングとソートを行ったデータフレームを返す
     get_processed_novel_data（キャッシュ） + ローカルパッチ適用
@@ -859,37 +1063,41 @@ def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, 
         df = df.copy()
 
     # ==================================================
-    # マスト条件: 「ネトコン14」を含む かつ 2024年2月1日以降
+    # 日付フィルタ
     # ==================================================
-
+    
     if "general_firstup" in df.columns:
-        temp_date = pd.to_datetime(df["general_firstup"], errors='coerce')
-        df = df[temp_date >= "2024-02-01"]
+        if firstup_from is not None:
+            df = df[df["general_firstup"] >= pd.to_datetime(firstup_from)]
+        if firstup_to is not None:
+            ts_to = pd.to_datetime(firstup_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            df = df[df["general_firstup"] <= ts_to]
+    
+    if "general_lastup" in df.columns:
+        if lastup_from is not None:
+            df = df[df["general_lastup"] >= pd.to_datetime(lastup_from)]
+        if lastup_to is not None:
+            ts_to = pd.to_datetime(lastup_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            df = df[df["general_lastup"] <= ts_to]
 
     if genre != "すべて":
         df = df[df["genre"] == genre]
 
-    if search_keyword:
-        keywords = search_keyword.replace("　", " ").split()
-        for k in keywords:
-            mask = (
-                df["title"].fillna("").astype(str).str.contains(k, case=False, na=False) |
-                df["writer"].fillna("").astype(str).str.contains(k, case=False, na=False) |
-                df["story"].fillna("").astype(str).str.contains(k, case=False, na=False) |
-                df["keyword"].fillna("").astype(str).str.contains(k, case=False, na=False)
+    if filter_netcon14:
+        if "keyword" in df.columns:
+            mask_netcon14 = (
+                df["keyword"].fillna("").astype(str).str.contains("ネトコン14", case=False, na=False) |
+                df["keyword"].fillna("").astype(str).str.contains("ネトコン１４", case=False, na=False)
             )
-            df = df[mask]
+            df = df[mask_netcon14]
 
-    if exclude_keyword:
-        exclude_keywords = exclude_keyword.replace("　", " ").split()
-        for k in exclude_keywords:
-            mask_exclude = (
-                df["title"].fillna("").astype(str).str.contains(k, case=False, na=False) |
-                df["writer"].fillna("").astype(str).str.contains(k, case=False, na=False) |
-                df["story"].fillna("").astype(str).str.contains(k, case=False, na=False) |
-                df["keyword"].fillna("").astype(str).str.contains(k, case=False, na=False)
-            )
-            df = df[~mask_exclude]
+    if search_keyword or exclude_keyword:
+        target_ncodes = search_ncodes_by_duckdb(search_keyword, exclude_keyword)
+        
+        if target_ncodes is not None:
+            df = df[df["ncode"].isin(target_ncodes)]
+
+
 
     if min_global is not None and min_global > 0:
         df = df[df["global_point"] >= min_global]
@@ -903,18 +1111,26 @@ def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, 
 
 @st.fragment
 def main_content(user_name):
+    if not st.session_state.get("data_loaded", False):
+        return
+    
     target_col = sort_map.get(sort_col_label) if sort_col_label else None
     ascending = (sort_order == "昇順")
 
     df = get_filtered_sorted_data(
         user_name, 
         genre, 
+        filter_netcon14, 
         search_keyword, 
         exclude_keyword, 
         min_global, 
         max_global, 
         target_col, 
-        ascending
+        ascending,
+        firstup_from,
+        firstup_to,
+        lastup_from,
+        lastup_to
     )
 
     tab_options = [
@@ -1078,9 +1294,9 @@ def main_content(user_name):
                     <span style="margin: 0 8px; color: #ddd;">|</span>
                     Nコード: {row['ncode']}
                     <span style="margin: 0 8px; color: #ddd;">|</span>
-                    初回掲載日: {row.get('general_firstup', '-').split(' ')[0]}
+                    初回掲載日: {str(row.get('general_firstup', '-')).split(' ')[0]}
                     <span style="margin: 0 8px;"></span>
-                    最終掲載日: {row.get('general_lastup', '-').split(' ')[0]}
+                    最終掲載日: {str(row.get('general_lastup', '-')).split(' ')[0]}
                 </div>
             </div>
             <div style="display: flex; gap: 10px;">
@@ -1232,9 +1448,12 @@ def main_content(user_name):
 
         with col_right:
             st.markdown('<div class="label" style="margin-bottom: 8px;">あらすじ</div>', unsafe_allow_html=True)
+            
+            story_text = load_novel_story(row['ncode'])
+            
             st.markdown(f"""
             <div class="story-box" style="margin-bottom: 30px;">
-            {row.get("story", "情報なし").replace('\n', '<br>')}
+            {story_text.replace('\n', '<br>')}
             </div>
             """, unsafe_allow_html=True)
 
@@ -1294,6 +1513,6 @@ def main_content(user_name):
             else:
                 st.info("まだ評価はありません")
 
-    st.write("")
+    st.write("")       
 
 main_content(user_name)
