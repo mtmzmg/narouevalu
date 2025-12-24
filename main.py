@@ -1488,33 +1488,41 @@ def main_content(user_name):
                         other_ratings_df = pd.concat([other_ratings_df, pd.DataFrame([new_row])], ignore_index=True)
 
             if not other_ratings_df.empty:
-                disp_ratings = other_ratings_df.copy()
-                if 'updated_at' in disp_ratings.columns:
-                    disp_ratings['updated_at'] = pd.to_datetime(disp_ratings['updated_at'], utc=True, errors='coerce').dt.tz_convert('Asia/Tokyo').dt.strftime('%Y-%m-%d %H:%M')
-
+                # 評価もコメントも無いデータ（キャンセル等）を除外
+                r_check = other_ratings_df["rating"].fillna("").astype(str).str.strip().replace("None", "")
+                c_check = other_ratings_df["comment"].fillna("").astype(str).str.strip().replace("None", "")
                 
-                target_cols = ['user_name', 'rating', 'comment', 'updated_at']
-                disp_ratings = disp_ratings[[c for c in target_cols if c in disp_ratings.columns]]
+                disp_ratings = other_ratings_df[(r_check != "") | (c_check != "")].copy()
                 
-                rename_map = {
-                    'user_name': '名前',
-                    'rating': '評価',
-                    'comment': 'コメント',
-                    'updated_at': '日時'
-                }
-                disp_ratings = disp_ratings.rename(columns=rename_map)
+                if disp_ratings.empty:
+                    st.info("まだ評価はありません")
+                else:
+                    if 'updated_at' in disp_ratings.columns:
+                        disp_ratings['updated_at'] = pd.to_datetime(disp_ratings['updated_at'], utc=True, errors='coerce').dt.tz_convert('Asia/Tokyo').dt.strftime('%Y-%m-%d %H:%M')
 
-                st.dataframe(
-                    disp_ratings, 
-                    hide_index=True, 
-                    width="stretch", # use_container_width=True is deprecated
-                    column_config={
-                        "名前": st.column_config.TextColumn(width="small"),
-                        "評価": st.column_config.TextColumn(width="small"),
-                        "コメント": st.column_config.TextColumn(width="large"),
-                        "日時": st.column_config.TextColumn(width="small"),
+                    
+                    target_cols = ['user_name', 'rating', 'comment', 'updated_at']
+                    disp_ratings = disp_ratings[[c for c in target_cols if c in disp_ratings.columns]]
+                    
+                    rename_map = {
+                        'user_name': '名前',
+                        'rating': '評価',
+                        'comment': 'コメント',
+                        'updated_at': '日時'
                     }
-                )
+                    disp_ratings = disp_ratings.rename(columns=rename_map)
+
+                    st.dataframe(
+                        disp_ratings, 
+                        hide_index=True, 
+                        width="stretch", # use_container_width=True is deprecated
+                        column_config={
+                            "名前": st.column_config.TextColumn(width="small"),
+                            "評価": st.column_config.TextColumn(width="small"),
+                            "コメント": st.column_config.TextColumn(width="large"),
+                            "日時": st.column_config.TextColumn(width="small"),
+                        }
+                    )
             else:
                 st.info("まだ評価はありません")
 
