@@ -1,0 +1,5 @@
+[server]
+fileWatcherType = "none"
+
+[runner]
+garbageCollectionInterval = 1000
