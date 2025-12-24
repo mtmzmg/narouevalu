@@ -860,7 +860,7 @@ if not df_export.empty:
         })
 
     if not df_target_ratings.empty:
-        df_agg = df_target_ratings.groupby("ncode", include_groups=False)[["user_name", "rating", "comment"]].apply(aggregate_ratings).reset_index()
+        df_agg = df_target_ratings.groupby("ncode")[["user_name", "rating", "comment"]].apply(aggregate_ratings).reset_index()
         df_export = pd.merge(df_export, df_agg, on="ncode", how="left")
     else:
         df_export["ratings_aggregated"] = ""
