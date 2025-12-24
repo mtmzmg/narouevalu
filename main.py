@@ -267,13 +267,13 @@ def load_user_ratings(user_name):
     )
     return pd.DataFrame(res.data)
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=900)
 def load_all_ratings_table():
     """全ユーザーの評価を取得（分類用）"""
     res = supabase.table("user_ratings").select("*").execute()
     return pd.DataFrame(res.data)
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=900)
 def load_novel_ratings_all(ncode):
     """特定作品の全ユーザー評価を取得"""
     try:
@@ -454,7 +454,7 @@ def calculate_novel_status(df_ratings):
 
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=900)
 def get_processed_novel_data(user_name):
     """
     表示用データの生成（キャッシュ化）
