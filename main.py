@@ -1305,12 +1305,12 @@ def main_content(user_name):
                 </div>
             </div>
             <div style="display: flex; gap: 10px;">
-                <a href="{narou_url}" target="_blank" style="text-decoration: none;">
+                <a href="{narou_url}" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
                     <div style="display: inline-flex; align-items: center; padding: 4px 12px; background-color: #eef2f6; border-radius: 15px; color: #2c3e50; font-size: 0.8rem; font-weight: 500; border: 1px solid #dae1e7; transition: all 0.2s;">
                         本文を読む
                     </div>
                 </a>
-                <a href="{google_url}" target="_blank" style="text-decoration: none;">
+                <a href="{google_url}" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
                     <div style="display: inline-flex; align-items: center; padding: 4px 12px; background-color: #fff; border-radius: 15px; color: #5f6368; font-size: 0.8rem; font-weight: 500; border: 1px solid #dae1e7; transition: all 0.2s;">
                         Google
                     </div>
