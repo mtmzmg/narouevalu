@@ -143,7 +143,6 @@ def load_master_data():
         st.error(f"読み込み対象ファイル数: {len(safe_files)}")
         if safe_files:
             st.error(f"最初のファイルパス: {safe_files[0]}")
-        conn.close()
         return pd.DataFrame()
     finally:
         conn.close()
@@ -152,8 +151,8 @@ def load_master_data():
         df["genre"] = df["genre"].astype(str).map(GENRE_MAP).fillna(df["genre"])
 
     numeric_cols = ["global_point", "daily_point", "weekly_point", "monthly_point", 
-                   "quarter_point", "yearly_point", "all_point", "general_all_no", 
-                   "weekly_unique", "fav_novel_cnt", "impression_cnt", "review_cnt", "sasie_cnt", "kaiwaritu"]
+                    "quarter_point", "yearly_point", "all_point", "general_all_no", 
+                    "weekly_unique", "fav_novel_cnt", "impression_cnt", "review_cnt", "sasie_cnt", "kaiwaritu"]
     
     df[numeric_cols] = df[numeric_cols].fillna(0)
 
@@ -182,15 +181,18 @@ def load_novel_story(ncode):
     
     query = f"SELECT story FROM read_parquet([{file_list_str}]) WHERE ncode = ?"
     
+    conn = None
     try:
         conn = duckdb.connect(database=':memory:')
         result = conn.execute(query, [ncode]).fetchone()
-        conn.close()
         
         if result:
             return result[0]
     except Exception as e:
         return f"あらすじ取得エラー: {str(e)}"
+    finally:
+        if conn:
+            conn.close()
         
     return "情報なし"
 
@@ -248,14 +250,17 @@ def search_ncodes_by_duckdb(search_keyword_str, exclude_keyword_str):
             
     full_query = " ".join(query_parts)
     
+    conn = None
     try:
         conn = duckdb.connect(database=':memory:')
         result = conn.execute(full_query, params).fetchall()
-        conn.close()
         return [r[0] for r in result]
     except Exception as e:
         st.error(f"検索エラー: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
 
 @st.cache_data(ttl=300)
 def load_user_ratings(user_name):
@@ -316,7 +321,6 @@ def save_rating(ncode, user_name, rating, comment, role):
         "updated_at": data["updated_at"]
     }
     
-    
     return True
 
 def on_rating_button_click(ncode, user_name, target_rating, current_rating, role):
@@ -335,7 +339,6 @@ def save_comment_only(ncode, user_name, comment, role):
         target = current[current["ncode"] == ncode]
         if not target.empty:
             current_rating = target.iloc[0]["rating"]
-    
     
     data = {
         "ncode": ncode,
@@ -357,8 +360,6 @@ def save_comment_only(ncode, user_name, comment, role):
         "role": role,
         "updated_at": data["updated_at"]
     }
-
-
 
 def determine_status(sub_df):
     """
@@ -1195,8 +1196,7 @@ def main_content(user_name):
             font-weight: 500;
         }
 
-        /* 
-           重要: Streamlitのラジオボタンは構造が複雑で、CSSの:has()対応ブラウザなら
+        /* 重要: Streamlitのラジオボタンは構造が複雑で、CSSの:has()対応ブラウザなら
            label:has(input:checked) でいけるが、Streamlitはinputを隠蔽していることが多い。
            しかし、標準的なスタイルでは選択されたアイテムのテキスト色がプライマリカラーになるため、
            それを利用して下線に見えるようなborderを追加するトリックを使う。
@@ -1488,7 +1488,6 @@ def main_content(user_name):
                         other_ratings_df = pd.concat([other_ratings_df, pd.DataFrame([new_row])], ignore_index=True)
 
             if not other_ratings_df.empty:
-                # 評価もコメントも無いデータ（キャンセル等）を除外
                 r_check = other_ratings_df["rating"].fillna("").astype(str).str.strip().replace("None", "")
                 c_check = other_ratings_df["comment"].fillna("").astype(str).str.strip().replace("None", "")
                 
@@ -1515,7 +1514,7 @@ def main_content(user_name):
                     st.dataframe(
                         disp_ratings, 
                         hide_index=True, 
-                        width="stretch", # use_container_width=True is deprecated
+                        width=None, 
                         column_config={
                             "名前": st.column_config.TextColumn(width="small"),
                             "評価": st.column_config.TextColumn(width="small"),
@@ -1526,6 +1525,6 @@ def main_content(user_name):
             else:
                 st.info("まだ評価はありません")
 
-    st.write("")       
+    st.write("")        
 
 main_content(user_name)
