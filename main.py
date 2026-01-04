@@ -148,7 +148,7 @@ def load_master_data():
         conn.close()
 
     if "genre" in df.columns:
-        df["genre"] = df["genre"].astype(str).map(GENRE_MAP).fillna(df["genre"])
+        df["genre"] = df["genre"].astype(str).map(GENRE_MAP).fillna(df["genre"]).astype("category")
 
     numeric_cols = ["global_point", "daily_point", "weekly_point", "monthly_point", 
                     "quarter_point", "yearly_point", "all_point", "general_all_no", 
