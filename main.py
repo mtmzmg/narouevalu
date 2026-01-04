@@ -4,16 +4,13 @@ import time
 import os
 import duckdb
 import glob
-import gc
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
-from st_aggrid import AgGrid, GridOptionsBuilder
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
 # ==================================================
 # 定数定義
 # ==================================================
-pd.set_option('future.no_silent_downcasting', True)
-
 try:
     auth_config = st.secrets["auth"]
     USER_LIST = auth_config["users"]
@@ -109,32 +106,17 @@ def load_master_data():
     try:
         escaped_files = [f.replace("'", "''") for f in safe_files]
         file_list_str = ', '.join([f"'{f}'" for f in escaped_files])
-        
-        def cast_col(col):
-            return f"TRY_CAST(REPLACE(CAST({col} AS VARCHAR), ',', '') AS BIGINT) AS {col}"
-
         query = f"""
             SELECT 
                 ncode, title, userid, writer, biggenre, genre, gensaku, keyword,
-                general_firstup, general_lastup, novel_type, "end", 
-                {cast_col('general_all_no')},
+                general_firstup, general_lastup, novel_type, "end", general_all_no,
                 length, "time", isstop, isr15, isbl, isgl, iszankoku, istensei, istenni,
-                {cast_col('global_point')},
-                {cast_col('daily_point')},
-                {cast_col('weekly_point')},
-                {cast_col('monthly_point')},
-                {cast_col('quarter_point')},
-                {cast_col('yearly_point')},
-                {cast_col('fav_novel_cnt')},
-                {cast_col('impression_cnt')},
-                {cast_col('review_cnt')},
-                {cast_col('all_point')},
-                {cast_col('all_hyoka_cnt')},
-                {cast_col('sasie_cnt')},
-                {cast_col('kaiwaritu')},
-                novelupdated_at, updated_at,
-                {cast_col('weekly_unique')}
+                global_point, daily_point, weekly_point, monthly_point, quarter_point,
+                yearly_point, fav_novel_cnt, impression_cnt, review_cnt, all_point,
+                all_hyoka_cnt, sasie_cnt, kaiwaritu, novelupdated_at, updated_at,
+                weekly_unique
             FROM read_parquet([{file_list_str}])
+            WHERE general_firstup >= '2024-02-01'
         """
         
         df = conn.execute(query).df()
@@ -143,30 +125,29 @@ def load_master_data():
         st.error(f"読み込み対象ファイル数: {len(safe_files)}")
         if safe_files:
             st.error(f"最初のファイルパス: {safe_files[0]}")
+        conn.close()
         return pd.DataFrame()
     finally:
         conn.close()
 
     if "genre" in df.columns:
-        df["genre"] = df["genre"].astype(str).map(GENRE_MAP).fillna(df["genre"])
+        df["genre"] = df["genre"].astype(str).map(GENRE_MAP).fillna(df["genre"]).astype("category")
 
     numeric_cols = ["global_point", "daily_point", "weekly_point", "monthly_point", 
-                    "quarter_point", "yearly_point", "all_point", "general_all_no", 
-                    "weekly_unique", "fav_novel_cnt", "impression_cnt", "review_cnt", "sasie_cnt", "kaiwaritu"]
+                   "quarter_point", "yearly_point", "all_point", "general_all_no", 
+                   "weekly_unique", "fav_novel_cnt", "impression_cnt", "review_cnt", "sasie_cnt", "kaiwaritu"]
     
-    df[numeric_cols] = df[numeric_cols].fillna(0)
-
-    date_cols = ["general_firstup", "general_lastup", "novelupdated_at", "updated_at"]
-    for col in date_cols:
+    for col in numeric_cols:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
-
-    gc.collect()
+            if df[col].dtype == object:
+                df[col] = df[col].astype(str).str.replace(",", "", regex=False)
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
     return df
 
 @st.cache_data(ttl=3600)
 def load_novel_story(ncode):
+    """指定されたNコードのあらすじのみを取得する"""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     parquet_pattern = os.path.join(base_dir, "narou_novels_part*.parquet")
     
@@ -180,23 +161,25 @@ def load_novel_story(ncode):
     
     query = f"SELECT story FROM read_parquet([{file_list_str}]) WHERE ncode = ?"
     
-    conn = None
     try:
         conn = duckdb.connect(database=':memory:')
         result = conn.execute(query, [ncode]).fetchone()
+        conn.close()
         
         if result:
             return result[0]
     except Exception as e:
         return f"あらすじ取得エラー: {str(e)}"
-    finally:
-        if conn:
-            conn.close()
         
     return "情報なし"
 
 @st.cache_data(ttl=300)
 def search_ncodes_by_duckdb(search_keyword_str, exclude_keyword_str):
+    """
+    DuckDBを使ってParquetファイルから高速に検索を行い、
+    条件に合致するNコードのリストを返す。
+    メモリに全データを展開せずにあらすじ検索が可能。
+    """
     if not search_keyword_str and not exclude_keyword_str:
         return None
 
@@ -244,17 +227,14 @@ def search_ncodes_by_duckdb(search_keyword_str, exclude_keyword_str):
             
     full_query = " ".join(query_parts)
     
-    conn = None
     try:
         conn = duckdb.connect(database=':memory:')
         result = conn.execute(full_query, params).fetchall()
+        conn.close()
         return [r[0] for r in result]
     except Exception as e:
         st.error(f"検索エラー: {e}")
         return []
-    finally:
-        if conn:
-            conn.close()
 
 @st.cache_data(ttl=300)
 def load_user_ratings(user_name):
@@ -266,13 +246,15 @@ def load_user_ratings(user_name):
     )
     return pd.DataFrame(res.data)
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=60)
 def load_all_ratings_table():
+    """全ユーザーの評価を取得（分類用）"""
     res = supabase.table("user_ratings").select("*").execute()
     return pd.DataFrame(res.data)
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=60)
 def load_novel_ratings_all(ncode):
+    """特定作品の全ユーザー評価を取得"""
     try:
         res = (
             supabase.table("user_ratings")
@@ -285,11 +267,13 @@ def load_novel_ratings_all(ncode):
         return pd.DataFrame()
 
 def get_jst_now():
+    """JSTの現在時刻を取得してISOフォーマット文字列で返す"""
     JST = timezone(timedelta(hours=9), 'JST')
     return datetime.now(JST).isoformat()
 
 
 def save_rating(ncode, user_name, rating, comment, role):
+    """評価を保存"""
     data = {
         "ncode": ncode,
         "user_name": user_name,
@@ -311,9 +295,11 @@ def save_rating(ncode, user_name, rating, comment, role):
         "updated_at": data["updated_at"]
     }
     
+    
     return True
 
 def on_rating_button_click(ncode, user_name, target_rating, current_rating, role):
+    """評価ボタン押下時のコールバック"""
     comment = st.session_state.get(f"input_comment_area_{ncode}", "")
     
     new_rating = None if current_rating == target_rating else target_rating
@@ -321,12 +307,14 @@ def on_rating_button_click(ncode, user_name, target_rating, current_rating, role
     save_rating(ncode, user_name, new_rating, comment, role)
 
 def save_comment_only(ncode, user_name, comment, role):
+    """コメントのみ保存（評価は維持）"""
     current = load_user_ratings(user_name)
     current_rating = None
     if not current.empty:
         target = current[current["ncode"] == ncode]
         if not target.empty:
             current_rating = target.iloc[0]["rating"]
+    
     
     data = {
         "ncode": ncode,
@@ -349,7 +337,12 @@ def save_comment_only(ncode, user_name, comment, role):
         "updated_at": data["updated_at"]
     }
 
+
+
 def determine_status(sub_df):
+    """
+    データフレーム（特定作品の評価一覧）からステータスフラグを判定する
+    """
     flags = {
         "is_ng": False,
         "is_admin_evaluated": False,
@@ -394,50 +387,35 @@ def determine_status(sub_df):
 
 
 def calculate_novel_status(df_ratings):
+    """
+    全評価データから作品ごとの分類ステータスを算出
+    優先度: NG > 原作管理× > ○ > △ > ×
+    """
     if df_ratings.empty:
         return pd.DataFrame()
 
-    valid_mask = df_ratings["rating"].notna() & (df_ratings["rating"] != "")
-    df_valid = df_ratings[valid_mask].copy()
+    if "role" not in df_ratings.columns:
+        pass
 
-    if df_valid.empty:
-        return pd.DataFrame()
-
-    df_valid["is_ng_flag"] = df_valid["rating"] == "NG"
+    results = []
     
-    is_admin = df_valid["user_name"].isin(ADMIN_TEAM_USERS)
-    is_general = df_valid["user_name"].isin(GENERAL_TEAM_USERS)
-    
-    is_positive = df_valid["rating"].isin(["〇", "○", "△"])
-    
-    df_valid["admin_pos"] = is_admin & is_positive
-    df_valid["admin_neg"] = is_admin & ~is_positive & ~df_valid["is_ng_flag"]
-    
-    df_valid["gen_pos"] = is_general & is_positive
-    df_valid["gen_neg"] = is_general & ~is_positive & ~df_valid["is_ng_flag"]
-    
-    grouped = df_valid.groupby("ncode")[["is_ng_flag", "admin_pos", "admin_neg", "gen_pos", "gen_neg"]].any()
-    
-    result = pd.DataFrame(index=grouped.index)
-    result["ncode"] = grouped.index
-    
-    result["is_ng"] = grouped["is_ng_flag"]
-    
-    result["is_admin_evaluated"] = grouped["admin_pos"]
-    result["is_admin_rejected"] = grouped["admin_neg"] & ~grouped["admin_pos"]
-    
-    result["is_general_evaluated"] = grouped["gen_pos"]
-    result["is_general_rejected"] = grouped["gen_neg"] & ~grouped["gen_pos"]
-    
-    ng_mask = result["is_ng"]
-    result.loc[ng_mask, ["is_admin_evaluated", "is_admin_rejected", "is_general_evaluated", "is_general_rejected"]] = False
-    
-    return result.reset_index(drop=True)
+    for ncode, group in df_ratings.groupby("ncode"):
+        flags = determine_status(group)
+        row = {"ncode": ncode}
+        row.update(flags)
+        results.append(row)
+        
+    return pd.DataFrame(results)
 
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=60)
 def get_processed_novel_data(user_name):
+    """
+    表示用データの生成（キャッシュ化）
+    Fragmentのリラン時に高速に応答するために、重い処理（結合・計算）をキャッシュする。
+    評価更新時はこのキャッシュをクリアする。
+    """
     df_master = load_master_data()
     df_ratings = load_user_ratings(user_name)
     df_all_ratings_raw = load_all_ratings_table()
@@ -454,7 +432,7 @@ def get_processed_novel_data(user_name):
             if col not in df.columns:
                 df[col] = False
             else:
-                df[col] = df[col].fillna(False).astype(bool)
+                df[col] = df[col].fillna(False)
 
         evaluated_ncodes = df_classification["ncode"].unique()
         df.loc[~df["ncode"].isin(evaluated_ncodes), "is_unclassified"] = True
@@ -486,7 +464,7 @@ def get_processed_novel_data(user_name):
         
         if not others_df.empty:
             others_df["_temp_summary"] = others_df["user_name"] + ":" + others_df["rating"]
-            others_agg = others_df.groupby("ncode")["_temp_summary"].agg(" ".join).reset_index()
+            others_agg = others_df.groupby("ncode")["_temp_summary"].apply(lambda x: " ".join(x)).reset_index()
             others_agg.columns = ["ncode", "other_ratings_text"]
             df = pd.merge(df, others_agg, on="ncode", how="left")
     
@@ -512,6 +490,9 @@ def get_processed_novel_data(user_name):
 
 
 def apply_local_patches(df, user_name):
+    """
+    キャッシュされたデータフレームに対し、ローカル（session_state）上の未反映パッチを適用する
+    """
     if "local_rating_patches" not in st.session_state or not st.session_state["local_rating_patches"]:
         return df
 
@@ -635,18 +616,6 @@ st.markdown("""
         font-size: 0.95rem;
         border-left: 4px solid #3498db;
     }
-    
-    /* チェックボックスを黒に */
-    div[data-testid="stSidebar"] div[data-testid="stCheckbox"]:has(input[id*="filter_netcon14"]) input[type="checkbox"]:checked {
-        background-color: #000000 !important;
-        border-color: #000000 !important;
-    }
-    div[data-testid="stSidebar"] div[data-testid="stCheckbox"]:has(input[id*="filter_netcon14"]) input[type="checkbox"] {
-        border-color: #000000 !important;
-    }
-    div[data-testid="stSidebar"] div[data-testid="stCheckbox"]:has(input[id*="filter_netcon14"]) input[type="checkbox"]:checked::after {
-        border-color: #ffffff !important;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -654,11 +623,39 @@ st.title("なろう小説 ダッシュボード")
 
 with st.spinner("データ読み込み中…"):
     df_master = load_master_data()
-    st.session_state["data_loaded"] = True
 
 if df_master.empty:
     st.error("マスタデータが取得できません")
     st.stop()
+
+# ==================================================
+# フィルタ
+# ==================================================
+st.sidebar.header("絞り込み")
+st.sidebar.caption("初回投稿日が2024年2月1日以降かつ第14回ネット小説大賞の投稿作のみ表示中")
+
+genres = ["すべて"]
+if "genre" in df_master.columns:
+    existing_genres = set(df_master["genre"].dropna().unique())
+    
+    sorted_genres = []
+    for g_val in GENRE_MAP.values():
+        if g_val in existing_genres:
+            sorted_genres.append(g_val)
+    
+    others = sorted(list(existing_genres - set(sorted_genres)))
+    
+    genres += sorted_genres + others
+
+genre = st.sidebar.selectbox("ジャンル", genres)
+
+search_keyword = st.sidebar.text_input("キーワード検索")
+exclude_keyword = st.sidebar.text_input("検索除外ワード")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("ポイントフィルタ")
+min_global = st.sidebar.number_input("総合ポイント 以上", min_value=0, value=0, step=1000)
+max_global = st.sidebar.number_input("総合ポイント 未満", min_value=0, value=0, step=1000)
 
 # ==================================================
 # 並び替え (Python側で実行)
@@ -687,71 +684,9 @@ if "日間ポイント" in sort_map:
 elif "総合評価ポイント" in sort_map:
     default_sort_index = list(sort_map.keys()).index("総合評価ポイント")
 
-sort_col_label = st.sidebar.selectbox("並び替え項目", list(sort_map.keys()), index=default_sort_index, label_visibility="collapsed")
-if st.session_state.get("data_loaded", False):
-    sort_order = st.sidebar.radio("昇順・降順", ["降順", "昇順"], index=0, horizontal=True, label_visibility="collapsed")
-else:
-    if "sort_order" not in st.session_state:
-        st.session_state["sort_order"] = "降順"
-    sort_order = st.session_state["sort_order"]          
+sort_col_label = st.sidebar.selectbox("ソート項目", list(sort_map.keys()), index=default_sort_index)
+sort_order = st.sidebar.radio("順序", ["降順", "昇順"], index=0)          
 
-# ==================================================
-# フィルタ
-# ==================================================
-st.sidebar.header("絞り込み")
-
-genres = ["すべて"]
-if "genre" in df_master.columns:
-    existing_genres = set(df_master["genre"].dropna().unique())
-    
-    sorted_genres = []
-    for g_val in GENRE_MAP.values():
-        if g_val in existing_genres:
-            sorted_genres.append(g_val)
-    
-    others = sorted(list(existing_genres - set(sorted_genres)))
-    
-    genres += sorted_genres + others
-
-genre = st.sidebar.selectbox("ジャンル", genres)
-
-col_check, col_label = st.sidebar.columns([0.15, 0.85])
-with col_check:
-    filter_netcon14 = st.checkbox("第14回ネットコン応募作品", value=True, key="filter_netcon14", label_visibility="collapsed")
-with col_label:
-    st.markdown('<p style="font-size: 0.8em; color: #666; margin-top: 0.5rem; margin-bottom: 0; text-align: left;">第14回ネット小説大賞応募作品を表示</p>', unsafe_allow_html=True)
-
-search_keyword = st.sidebar.text_input("キーワード検索")
-exclude_keyword = st.sidebar.text_input("検索除外ワード")
-
-st.sidebar.markdown("---")
-st.sidebar.caption("ポイントフィルタ")
-min_global = st.sidebar.number_input("総合ポイント 以上", min_value=0, value=0, step=1000)
-max_global = st.sidebar.number_input("総合ポイント 未満", min_value=0, value=0, step=1000)
-
-st.sidebar.markdown("---")
-st.sidebar.caption("日付フィルタ")
-st.sidebar.text("初回掲載日")
-col1, col2, col3 = st.sidebar.columns([2.5, 0.3, 2.5])
-with col1:
-    firstup_from = st.date_input("開始", value=datetime(2024, 2, 1).date(), key="firstup_from", label_visibility="collapsed")
-with col2:
-    st.markdown("<div style='text-align: center; padding-top: 0.5rem;'>～</div>", unsafe_allow_html=True)
-with col3:
-    firstup_to = st.date_input("終了", value=None, key="firstup_to", label_visibility="collapsed")
-st.sidebar.text("最終掲載日")
-col4, col5, col6 = st.sidebar.columns([2.5, 0.3, 2.5])
-with col4:
-    lastup_from = st.date_input("開始", value=None, key="lastup_from", label_visibility="collapsed")
-with col5:
-    st.markdown("<div style='text-align: center; padding-top: 0.5rem;'>～</div>", unsafe_allow_html=True)
-with col6:
-    lastup_to = st.date_input("終了", value=None, key="lastup_to", label_visibility="collapsed")
-st.sidebar.caption("※初回掲載日が2024年2月1日以降の作品のみ対応")
-
-# ==================================================
-# データエクスポート
-# ==================================================
 st.sidebar.markdown("---")
 with st.sidebar.expander("ヘルプ"):
     st.markdown("""
@@ -779,99 +714,6 @@ with st.sidebar.expander("ヘルプ"):
     ○＞△＞×
     </div>
     """, unsafe_allow_html=True)
-
-df_export_base = get_processed_novel_data(user_name)
-df_export = apply_local_patches(df_export_base, user_name)
-
-if "is_unclassified" in df_export.columns:
-    df_export = df_export[~df_export["is_unclassified"].fillna(True)]
-else:
-    df_export = pd.DataFrame()
-
-if not df_export.empty:
-    df_all_ratings = load_all_ratings_table().copy()
-
-    if "local_rating_patches" in st.session_state and st.session_state["local_rating_patches"]:
-        patches = st.session_state["local_rating_patches"]
-        for ncode_patch, patch_data in patches.items():
-            mask = (df_all_ratings["ncode"] == ncode_patch) & (df_all_ratings["user_name"] == user_name)
-            if df_all_ratings[mask].empty:
-                new_row = {
-                    "ncode": ncode_patch,
-                    "user_name": user_name,
-                    "rating": patch_data["rating"],
-                    "comment": patch_data["comment"],
-                    "role": patch_data["role"],
-                    "updated_at": patch_data["updated_at"]
-                }
-                df_all_ratings = pd.concat([df_all_ratings, pd.DataFrame([new_row])], ignore_index=True)
-            else:
-                df_all_ratings.loc[mask, "rating"] = patch_data["rating"]
-                df_all_ratings.loc[mask, "comment"] = patch_data["comment"]
-                df_all_ratings.loc[mask, "role"] = patch_data["role"]
-                df_all_ratings.loc[mask, "updated_at"] = patch_data["updated_at"]
-    
-    target_ncodes = df_export["ncode"].unique()
-    df_target_ratings = df_all_ratings[df_all_ratings["ncode"].isin(target_ncodes)].copy()
-
-    def aggregate_ratings(group):
-        ratings = []
-        comments = []
-        for _, row in group.iterrows():
-            u = row.get("user_name", "")
-            r = row.get("rating", "")
-            c = row.get("comment", "")
-            
-            if pd.notna(r) and str(r).strip() != "":
-                ratings.append(f"{u}：{r}")
-            
-            if pd.notna(c) and str(c).strip() != "":
-                comments.append(f"{u}：{c}")
-        
-        return pd.Series({
-            "ratings_aggregated": "、".join(ratings),
-            "comments_aggregated": "、".join(comments)
-        })
-
-    if not df_target_ratings.empty:
-        df_agg = df_target_ratings.groupby("ncode")[["user_name", "rating", "comment"]].apply(aggregate_ratings).reset_index()
-        df_export = pd.merge(df_export, df_agg, on="ncode", how="left")
-    else:
-        df_export["ratings_aggregated"] = ""
-        df_export["comments_aggregated"] = ""
-
-    export_cols = {
-        "ncode": "Nコード",
-        "title": "タイトル",
-        "writer": "著者名",
-        "genre": "ジャンル",
-        "general_firstup": "初回掲載日",
-        "general_lastup": "最終掲載日",
-        "general_all_no": "話数",
-        "length": "文字数",
-        "global_point": "総合評価ポイント",
-        "ratings_aggregated": "評価",
-        "comments_aggregated": "コメント"
-    }
-
-    valid_cols = {k: v for k, v in export_cols.items() if k in df_export.columns}
-
-    df_csv = df_export[list(valid_cols.keys())].rename(columns=valid_cols)
-    
-    if "Nコード" in df_csv.columns:
-        df_csv = df_csv.sort_values("Nコード")
-
-        csv_str = df_csv.to_csv(index=False)
-        csv_bytes = csv_str.encode('utf-8-sig')
-
-        st.sidebar.download_button(
-            label="評価済みリストをCSV出力",
-            data=csv_bytes,
-            file_name=f"reviewed_novels_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-else:
-    st.sidebar.caption("評価済みの作品はありません")
 
 
 # ==================================================
@@ -904,14 +746,7 @@ def render_novel_list(df_in, key_suffix):
 
     for col in ["general_firstup", "general_lastup"]:
         if col in display_df.columns:
-            if pd.api.types.is_datetime64_any_dtype(display_df[col]):
-                display_df[col] = display_df[col].dt.strftime('%Y-%m-%d').fillna("-")
-            else:
-                display_df[col] = display_df[col].astype(str).apply(lambda x: x.split(" ")[0])
-
-    if "novelupdated_at" in display_df.columns:
-        if pd.api.types.is_datetime64_any_dtype(display_df["novelupdated_at"]):
-            display_df["novelupdated_at"] = display_df["novelupdated_at"].dt.strftime('%Y-%m-%d %H:%M').fillna("-")
+            display_df[col] = display_df[col].astype(str).apply(lambda x: x.split(" ")[0])
 
     gb = GridOptionsBuilder.from_dataframe(display_df)
     gb.configure_default_column(sortable=False)
@@ -972,7 +807,7 @@ def render_novel_list(df_in, key_suffix):
     grid_response = AgGrid(
         display_df,
         gridOptions=gridOptions,
-        update_on=['selectionChanged'],
+        update_mode=GridUpdateMode.SELECTION_CHANGED,
         fit_columns_on_grid_load=False,
         height=500,
         theme='streamlit',
@@ -1033,7 +868,11 @@ def render_novel_list(df_in, key_suffix):
 # ==================================================
 # タブによるリスト切り替え
 # ==================================================
-def get_filtered_sorted_data(user_name, genre, filter_netcon14, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending, firstup_from=None, firstup_to=None, lastup_from=None, lastup_to=None):
+def get_filtered_sorted_data(user_name, genre, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending):
+    """
+    フィルタリングとソートを行ったデータフレームを返す
+    get_processed_novel_data（キャッシュ） + ローカルパッチ適用
+    """
     df_base = get_processed_novel_data(user_name)
     
     df = apply_local_patches(df_base, user_name)
@@ -1042,37 +881,20 @@ def get_filtered_sorted_data(user_name, genre, filter_netcon14, search_keyword, 
         df = df.copy()
 
     # ==================================================
-    # 日付フィルタ
+    # マスト条件: 「ネトコン14」を含む かつ 2024年2月1日以降
     # ==================================================
-    
+
     if "general_firstup" in df.columns:
-        if firstup_from is not None:
-            df = df[df["general_firstup"] >= pd.to_datetime(firstup_from)]
-        if firstup_to is not None:
-            ts_to = pd.to_datetime(firstup_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            df = df[df["general_firstup"] <= ts_to]
-    
-    if "general_lastup" in df.columns:
-        if lastup_from is not None:
-            df = df[df["general_lastup"] >= pd.to_datetime(lastup_from)]
-        if lastup_to is not None:
-            ts_to = pd.to_datetime(lastup_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            df = df[df["general_lastup"] <= ts_to]
+        temp_date = pd.to_datetime(df["general_firstup"], errors='coerce')
+        df = df[temp_date >= "2024-02-01"]
 
     if genre != "すべて":
         df = df[df["genre"] == genre]
 
-    if filter_netcon14:
-        if "keyword" in df.columns:
-            mask_netcon14 = (
-                df["keyword"].fillna("").astype(str).str.contains("ネトコン14", case=False, na=False) |
-                df["keyword"].fillna("").astype(str).str.contains("ネトコン１４", case=False, na=False)
-            )
-            df = df[mask_netcon14]
-
     if search_keyword or exclude_keyword:
         target_ncodes = search_ncodes_by_duckdb(search_keyword, exclude_keyword)
         
+        # 検索結果がNoneでなければ（何らかの検索が行われていれば）絞り込み
         if target_ncodes is not None:
             df = df[df["ncode"].isin(target_ncodes)]
 
@@ -1088,26 +910,18 @@ def get_filtered_sorted_data(user_name, genre, filter_netcon14, search_keyword, 
 
 @st.fragment
 def main_content(user_name):
-    if not st.session_state.get("data_loaded", False):
-        return
-    
     target_col = sort_map.get(sort_col_label) if sort_col_label else None
     ascending = (sort_order == "昇順")
 
     df = get_filtered_sorted_data(
         user_name, 
         genre, 
-        filter_netcon14, 
         search_keyword, 
         exclude_keyword, 
         min_global, 
         max_global, 
         target_col, 
-        ascending,
-        firstup_from,
-        firstup_to,
-        lastup_from,
-        lastup_to
+        ascending
     )
 
     tab_options = [
@@ -1167,7 +981,8 @@ def main_content(user_name):
             font-weight: 500;
         }
 
-        /* 重要: Streamlitのラジオボタンは構造が複雑で、CSSの:has()対応ブラウザなら
+        /* 
+           重要: Streamlitのラジオボタンは構造が複雑で、CSSの:has()対応ブラウザなら
            label:has(input:checked) でいけるが、Streamlitはinputを隠蔽していることが多い。
            しかし、標準的なスタイルでは選択されたアイテムのテキスト色がプライマリカラーになるため、
            それを利用して下線に見えるようなborderを追加するトリックを使う。
@@ -1245,7 +1060,7 @@ def main_content(user_name):
         return
 
     row = row_df.iloc[0]
-
+    
     def fmt_num(val, unit=""):
         try:
             if pd.isna(val) or val == "": return "-"
@@ -1270,18 +1085,18 @@ def main_content(user_name):
                     <span style="margin: 0 8px; color: #ddd;">|</span>
                     Nコード: {row['ncode']}
                     <span style="margin: 0 8px; color: #ddd;">|</span>
-                    初回掲載日: {str(row.get('general_firstup', '-')).split(' ')[0]}
+                    初回掲載日: {row.get('general_firstup', '-').split(' ')[0]}
                     <span style="margin: 0 8px;"></span>
-                    最終掲載日: {str(row.get('general_lastup', '-')).split(' ')[0]}
+                    最終掲載日: {row.get('general_lastup', '-').split(' ')[0]}
                 </div>
             </div>
             <div style="display: flex; gap: 10px;">
-                <a href="{narou_url}" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
+                <a href="{narou_url}" target="_blank" style="text-decoration: none;">
                     <div style="display: inline-flex; align-items: center; padding: 4px 12px; background-color: #eef2f6; border-radius: 15px; color: #2c3e50; font-size: 0.8rem; font-weight: 500; border: 1px solid #dae1e7; transition: all 0.2s;">
                         本文を読む
                     </div>
                 </a>
-                <a href="{google_url}" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">
+                <a href="{google_url}" target="_blank" style="text-decoration: none;">
                     <div style="display: inline-flex; align-items: center; padding: 4px 12px; background-color: #fff; border-radius: 15px; color: #5f6368; font-size: 0.8rem; font-weight: 500; border: 1px solid #dae1e7; transition: all 0.2s;">
                         Google
                     </div>
@@ -1399,7 +1214,7 @@ def main_content(user_name):
                 
                 btn_type = "primary" if current_my_rating == "NG" else "secondary"
                 st.button(
-                    ng_label, 
+                    "NG（商業化済み／原作管理判定）", 
                     type=btn_type, 
                     use_container_width=True, 
                     key="btn_ng",
@@ -1416,7 +1231,7 @@ def main_content(user_name):
                 "コメント", 
                 value=initial_comment, 
                 height=100, 
-                key=f"input_comment_area_{row['ncode']}",
+                key=f"input_comment_area_{row['ncode']}",\
                 on_change=on_comment_change
             )
 
@@ -1425,6 +1240,7 @@ def main_content(user_name):
         with col_right:
             st.markdown('<div class="label" style="margin-bottom: 8px;">あらすじ</div>', unsafe_allow_html=True)
             
+            # あらすじを都度取得（軽量化）
             story_text = load_novel_story(row['ncode'])
             
             st.markdown(f"""
@@ -1459,43 +1275,36 @@ def main_content(user_name):
                         other_ratings_df = pd.concat([other_ratings_df, pd.DataFrame([new_row])], ignore_index=True)
 
             if not other_ratings_df.empty:
-                r_check = other_ratings_df["rating"].fillna("").astype(str).str.strip().replace("None", "")
-                c_check = other_ratings_df["comment"].fillna("").astype(str).str.strip().replace("None", "")
-                
-                disp_ratings = other_ratings_df[(r_check != "") | (c_check != "")].copy()
-                
-                if disp_ratings.empty:
-                    st.info("まだ評価はありません")
-                else:
-                    if 'updated_at' in disp_ratings.columns:
-                        disp_ratings['updated_at'] = pd.to_datetime(disp_ratings['updated_at'], utc=True, errors='coerce').dt.tz_convert('Asia/Tokyo').dt.strftime('%Y-%m-%d %H:%M')
+                disp_ratings = other_ratings_df.copy()
+                if 'updated_at' in disp_ratings.columns:
+                    disp_ratings['updated_at'] = pd.to_datetime(disp_ratings['updated_at'], utc=True, errors='coerce').dt.tz_convert('Asia/Tokyo').dt.strftime('%Y-%m-%d %H:%M')
 
-                    
-                    target_cols = ['user_name', 'rating', 'comment', 'updated_at']
-                    disp_ratings = disp_ratings[[c for c in target_cols if c in disp_ratings.columns]]
-                    
-                    rename_map = {
-                        'user_name': '名前',
-                        'rating': '評価',
-                        'comment': 'コメント',
-                        'updated_at': '日時'
+                
+                target_cols = ['user_name', 'rating', 'comment', 'updated_at']
+                disp_ratings = disp_ratings[[c for c in target_cols if c in disp_ratings.columns]]
+                
+                rename_map = {
+                    'user_name': '名前',
+                    'rating': '評価',
+                    'comment': 'コメント',
+                    'updated_at': '日時'
+                }
+                disp_ratings = disp_ratings.rename(columns=rename_map)
+
+                st.dataframe(
+                    disp_ratings, 
+                    hide_index=True, 
+                    use_container_width=True,
+                    column_config={
+                        "名前": st.column_config.TextColumn(width="small"),
+                        "評価": st.column_config.TextColumn(width="small"),
+                        "コメント": st.column_config.TextColumn(width="large"),
+                        "日時": st.column_config.TextColumn(width="small"),
                     }
-                    disp_ratings = disp_ratings.rename(columns=rename_map)
-
-                    st.dataframe(
-                        disp_ratings, 
-                        hide_index=True, 
-                        use_container_width=True, 
-                        column_config={
-                            "名前": st.column_config.TextColumn(width="small"),
-                            "評価": st.column_config.TextColumn(width="small"),
-                            "コメント": st.column_config.TextColumn(width="large"),
-                            "日時": st.column_config.TextColumn(width="small"),
-                        }
-                    )
+                )
             else:
                 st.info("まだ評価はありません")
 
-    st.write("")        
+    st.write("")       
 
 main_content(user_name)
