@@ -1514,7 +1514,7 @@ def main_content(user_name):
                     st.dataframe(
                         disp_ratings, 
                         hide_index=True, 
-                        width=None, 
+                        use_container_width=True, 
                         column_config={
                             "名前": st.column_config.TextColumn(width="small"),
                             "評価": st.column_config.TextColumn(width="small"),
