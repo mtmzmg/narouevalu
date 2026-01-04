@@ -1,4 +1,4 @@
-name: Daily Reboot (Trigger Update)
+name: Daily Reboot (Force Bake)
 
 on:
   schedule:
@@ -18,15 +18,20 @@ jobs:
         with:
           ref: main
 
-      - name: Update trigger file in Root Directory
+      - name: Update requirements.txt to force rebuild
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          TARGET_FILE="reboot_trigger.py"
+          REQ_FILE="requirements.txt"
           
-          echo "# Last reboot: $(date)" > $TARGET_FILE
+          if [ ! -f "$REQ_FILE" ]; then
+            touch "$REQ_FILE"
+          fi
+
+          echo "# Last force reboot: $(date)" >> "$REQ_FILE"
           
-          git add $TARGET_FILE
-          git commit -m "Daily Reboot Trigger: $(date)"
+          git add "$REQ_FILE"
+          git commit -m "Force Reboot: Update requirements.txt"
+          
           git push origin HEAD:main
