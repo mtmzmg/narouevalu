@@ -15,10 +15,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Trigger Reboot by Empty Commit
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git commit --allow-empty -m "Daily Reboot Trigger [skip ci]"
-          git push
+          # [skip ci] を削除しました
+          git commit --allow-empty -m "Daily Reboot Trigger"
+          git push origin HEAD:main
