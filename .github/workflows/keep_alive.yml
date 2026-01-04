@@ -2,7 +2,8 @@ name: Keep Streamlit App Alive (Browser)
 
 on:
   schedule:
-    - cron: '0 0,8,16 * * *'
+    # 4時間おきに実行 (1日6回: 0時, 4時, 8時, 12時, 16時, 20時 UTC)
+    - cron: '0 0,4,8,12,16,20 * * *'
   workflow_dispatch:
 
 jobs:
