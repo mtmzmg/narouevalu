@@ -18,14 +18,17 @@ jobs:
         with:
           ref: main
 
-      - name: Update timestamp file to trigger reboot
+      - name: Update trigger file in App Directory
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          date > reboot_log.txt
+          TARGET_FILE="NarouEvalu/reboot_trigger.py"
           
-          git add reboot_log.txt
+          mkdir -p $(dirname $TARGET_FILE)
+
+          echo "# Last reboot: $(date)" > $TARGET_FILE
           
+          git add $TARGET_FILE
           git commit -m "Daily Reboot Trigger: $(date)"
           git push origin HEAD:main
