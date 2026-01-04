@@ -8,10 +8,6 @@ import gc
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from st_aggrid import AgGrid, GridOptionsBuilder
-try:
-    import reboot_trigger
-except ImportError:
-    pass
 
 # ==================================================
 # 定数定義
