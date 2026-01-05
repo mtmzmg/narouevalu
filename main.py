@@ -898,7 +898,9 @@ def execute_search_query(conn, user_name, genre_label, filter_netcon14, search_k
         safe_cols = ["global_point", "daily_point", "novelupdated_at", "ncode", "title", "writer", "genre", "general_firstup", "general_lastup", "general_all_no", "weekly_unique"]
         if sort_col in safe_cols:
             direction = "ASC" if is_ascending else "DESC"
-            query_select += f" ORDER BY t1.{sort_col} {direction} NULLS LAST"
+            query_select += f" ORDER BY t1.{sort_col} {direction} NULLS LAST, t1.ncode ASC"
+    else:
+        query_select += " ORDER BY t1.ncode ASC"
             
     if page_size > 0:
         offset = (page - 1) * page_size
