@@ -625,50 +625,69 @@ with st.sidebar.expander("ヘルプ"):
     """, unsafe_allow_html=True)
 
 # エクスポート用：評価済み（ステータスあり）の作品だけを抽出して処理
-if st.sidebar.button("評価済みリストをCSV準備"):
+if st.sidebar.button("評価済みリストをCSV出力作成"):
     try:
-        # DuckDBから評価済みデータを結合して取得
-        export_query = """
-            SELECT 
-                t1.ncode as "Nコード",
-                t1.title as "タイトル",
-                t1.writer as "著者名",
-                t1.genre as "ジャンル",
-                strftime(t1.general_firstup, '%Y-%m-%d') as "初回掲載日",
-                strftime(t1.general_lastup, '%Y-%m-%d') as "最終掲載日",
-                t1.general_all_no as "話数",
-                t1.length as "文字数",
-                t1.global_point as "総合評価ポイント",
-                GROUP_CONCAT(t3.user_name || '：' || t3.rating, '、') as "評価",
-                GROUP_CONCAT(t3.user_name || '：' || t3.comment, '、') as "コメント"
-            FROM master_novels t1
-            JOIN user_ratings_raw t3 ON t1.ncode = t3.ncode
-            WHERE t3.rating IS NOT NULL AND t3.rating != ''
-            GROUP BY 
-                t1.ncode, t1.title, t1.writer, t1.genre, 
-                t1.general_firstup, t1.general_lastup, 
-                t1.general_all_no, t1.length, t1.global_point
-            ORDER BY t1.ncode
-        """
-        df_export = conn.execute(export_query).df()
-        
-        if not df_export.empty:
-            # ジャンルID変換
-            df_export["ジャンル"] = df_export["ジャンル"].astype(str).map(GENRE_MAP).fillna(df_export["ジャンル"])
+        with st.spinner("CSV作成中..."):
+            # DuckDBから評価済みデータを結合して取得
+            export_query = """
+                SELECT 
+                    t1.ncode as "Nコード",
+                    t1.title as "タイトル",
+                    t1.writer as "著者名",
+                    t1.genre as "ジャンル",
+                    strftime(t1.general_firstup, '%Y-%m-%d') as "初回掲載日",
+                    strftime(t1.general_lastup, '%Y-%m-%d') as "最終掲載日",
+                    t1.general_all_no as "話数",
+                    t1.length as "文字数",
+                    t1.global_point as "総合評価ポイント",
+                    GROUP_CONCAT(
+                        CASE WHEN t3.rating IS NOT NULL AND t3.rating != '' 
+                             THEN t3.user_name || '：' || t3.rating 
+                             ELSE NULL END, 
+                        '　'
+                    ) as "評価",
+                    GROUP_CONCAT(
+                        CASE WHEN t3.comment IS NOT NULL AND t3.comment != '' 
+                             THEN t3.user_name || '：' || t3.comment 
+                             ELSE NULL END, 
+                        '　'
+                    ) as "コメント"
+                FROM master_novels t1
+                JOIN user_ratings_raw t3 ON t1.ncode = t3.ncode
+                WHERE t3.rating IS NOT NULL AND t3.rating != ''
+                GROUP BY 
+                    t1.ncode, t1.title, t1.writer, t1.genre, 
+                    t1.general_firstup, t1.general_lastup, 
+                    t1.general_all_no, t1.length, t1.global_point
+                ORDER BY t1.ncode
+            """
+            df_export = conn.execute(export_query).df()
             
-            csv_str = df_export.to_csv(index=False)
-            csv_bytes = csv_str.encode('utf-8-sig')
+            if not df_export.empty:
+                # ジャンルID変換
+                df_export["ジャンル"] = df_export["ジャンル"].astype(str).map(GENRE_MAP).fillna(df_export["ジャンル"])
+                
+                csv_str = df_export.to_csv(index=False)
+                csv_bytes = csv_str.encode('utf-8-sig')
+                
+                # session_stateに保存して再描画時も保持
+                st.session_state["export_csv"] = csv_bytes
+                st.session_state["export_time"] = datetime.now().strftime('%Y%m%d_%H%M%S')
+            else:
+                st.sidebar.warning("評価済みの作品はありません")
+                if "export_csv" in st.session_state:
+                    del st.session_state["export_csv"]
 
-            st.sidebar.download_button(
-                label="評価済みリストをCSV出力",
-                data=csv_bytes,
-                file_name=f"reviewed_novels_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-        else:
-            st.sidebar.warning("評価済みの作品はありません")
     except Exception as e:
         st.sidebar.error(f"エクスポートエラー: {e}")
+
+if "export_csv" in st.session_state:
+    st.sidebar.download_button(
+        label="ダウンロード",
+        data=st.session_state["export_csv"],
+        file_name=f"reviewed_novels_{st.session_state['export_time']}.csv",
+        mime="text/csv"
+    )
 
 # ==================================================
 # リスト表示関数
