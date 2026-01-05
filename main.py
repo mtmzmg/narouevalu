@@ -437,9 +437,12 @@ def calculate_novel_status(df_ratings):
 
 
 @st.cache_data(ttl=900)
-def get_processed_novel_data(user_name):
+def load_global_basic_data():
+    """
+    全ユーザー共通の基本データ（マスタ＋ステータスフラグ）を読み込む。
+    ユーザー固有の情報（my_ratingなど）や重いテキスト（comments）は含まない。
+    """
     df_master = load_master_data()
-    df_ratings = load_user_ratings(user_name)
     df_all_ratings_raw = load_all_ratings_table()
     
     df_classification = calculate_novel_status(df_all_ratings_raw)
@@ -468,6 +471,27 @@ def get_processed_novel_data(user_name):
         df["is_general_rejected"] = False
         df["is_unclassified"] = True
         
+    def get_disp_status(row):
+        if row["is_ng"]: return "NG"
+        if row["is_admin_evaluated"]: return "Admin〇△"
+        if row["is_admin_rejected"]: return "Admin×"
+        if row["is_general_evaluated"]: return "Gen〇△"
+        if row["is_general_rejected"]: return "Gen×"
+        return "-"
+
+    df["classification"] = df.apply(get_disp_status, axis=1)
+    
+    return df
+
+# 旧関数はエクスポート用などに残すが、キャッシュは削除し、内部でGlobalデータを呼ぶように変更推奨
+# しかし互換性のため残しつつ、中身をGlobalデータ利用に変える
+def get_processed_novel_data(user_name):
+    # エクスポート用などでフルデータが必要な場合に使用（キャッシュしない）
+    df = load_global_basic_data().copy()
+    
+    df_ratings = load_user_ratings(user_name)
+    df_all_ratings_raw = load_all_ratings_table()
+    
     if not df_ratings.empty:
         my_ratings = df_ratings[["ncode", "rating", "comment"]].rename(
             columns={"rating": "my_rating", "comment": "my_comment"}
@@ -492,26 +516,15 @@ def get_processed_novel_data(user_name):
     
     if "other_ratings_text" not in df.columns:
         df["other_ratings_text"] = None
-
-    if len(evaluated_ncodes) > 0:
-        df.loc[~df["ncode"].isin(evaluated_ncodes), "is_unclassified"] = True
-    elif df_classification.empty:
-        df["is_unclassified"] = True
-
-    def get_disp_status(row):
-        if row["is_ng"]: return "NG"
-        if row["is_admin_evaluated"]: return "Admin〇△"
-        if row["is_admin_rejected"]: return "Admin×"
-        if row["is_general_evaluated"]: return "Gen〇△"
-        if row["is_general_rejected"]: return "Gen×"
-        return "-"
-
-    df["classification"] = df.apply(get_disp_status, axis=1)
-    
+        
     return df
 
 
-def apply_local_patches(df, user_name):
+def apply_local_flag_patches(df, user_name):
+    """
+    データフレームのフラグ（is_ngなど）だけをセッションステートのパッチ情報で更新する。
+    my_ratingなどの列は更新しない。
+    """
     if "local_rating_patches" not in st.session_state or not st.session_state["local_rating_patches"]:
         return df
 
@@ -521,44 +534,42 @@ def apply_local_patches(df, user_name):
     df_all_ratings = load_all_ratings_table()
     
     for ncode, patch in patches.items():
+        # グローバルデータに含まれる場合のみ処理
         if ncode in df_patched["ncode"].values:
-            idx = df_patched[df_patched["ncode"] == ncode].index
-            df_patched.loc[idx, "my_rating"] = patch["rating"]
-            df_patched.loc[idx, "my_comment"] = patch["comment"]
-        
-        novel_ratings = df_all_ratings[df_all_ratings["ncode"] == ncode].copy()
-        
-        my_row_idx = novel_ratings[novel_ratings["user_name"] == user_name].index
-        
-        new_row = {
-            "ncode": ncode,
-            "user_name": user_name,
-            "rating": patch["rating"],
-            "comment": patch["comment"],
-            "role": patch["role"],
-            "updated_at": patch["updated_at"]
-        }
-        
-        if not my_row_idx.empty:
-            for k, v in new_row.items():
-                novel_ratings.loc[my_row_idx, k] = v
-        else:
-            novel_ratings = pd.concat([novel_ratings, pd.DataFrame([new_row])], ignore_index=True)
+            # 該当作品の全評価を取得して再計算
+            novel_ratings = df_all_ratings[df_all_ratings["ncode"] == ncode].copy()
             
-        flags = determine_status(novel_ratings)
-        
-        if ncode in df_patched["ncode"].values:
+            my_row_idx = novel_ratings[novel_ratings["user_name"] == user_name].index
+            
+            new_row = {
+                "ncode": ncode,
+                "user_name": user_name,
+                "rating": patch["rating"],
+                "comment": patch["comment"],
+                "role": patch["role"],
+                "updated_at": patch["updated_at"]
+            }
+            
+            if not my_row_idx.empty:
+                for k, v in new_row.items():
+                    novel_ratings.loc[my_row_idx, k] = v
+            else:
+                novel_ratings = pd.concat([novel_ratings, pd.DataFrame([new_row])], ignore_index=True)
+                
+            flags = determine_status(novel_ratings)
+            
             idx = df_patched[df_patched["ncode"] == ncode].index
             
             for flag_name, flag_val in flags.items():
-                df_patched.loc[idx, flag_name] = flag_val
+                if flag_name in df_patched.columns:
+                    df_patched.loc[idx, flag_name] = flag_val
             
             def get_disp_status_single(row):
-                if row["is_ng"]: return "NG"
-                if row["is_admin_evaluated"]: return "Admin〇△"
-                if row["is_admin_rejected"]: return "Admin×"
-                if row["is_general_evaluated"]: return "Gen〇△"
-                if row["is_general_rejected"]: return "Gen×"
+                if row.get("is_ng"): return "NG"
+                if row.get("is_admin_evaluated"): return "Admin〇△"
+                if row.get("is_admin_rejected"): return "Admin×"
+                if row.get("is_general_evaluated"): return "Gen〇△"
+                if row.get("is_general_rejected"): return "Gen×"
                 return "-"
             
             df_patched.loc[idx, "classification"] = df_patched.loc[idx].apply(get_disp_status_single, axis=1)
@@ -779,17 +790,42 @@ with st.sidebar.expander("ヘルプ"):
     ○＞△＞×
     </div>
     """, unsafe_allow_html=True)
+    
+    # エクスポート用：軽量化のため、まずGlobalデータから評価済み（またはパッチで評価されたもの）のみを抽出
+    df_global = load_global_basic_data()
+    # コピーを作成してパッチ（Flag）を適用
+    df_export = df_global.copy()
+    df_export = apply_local_flag_patches(df_export, user_name)
+    
+    # 未評価を除外
+    if "is_unclassified" in df_export.columns:
+        df_export = df_export[~df_export["is_unclassified"].fillna(True)]
+    else:
+        df_export = pd.DataFrame()
 
-df_export_base = get_processed_novel_data(user_name)
-df_export = apply_local_patches(df_export_base, user_name)
+    # データがある場合のみ詳細情報をマージ
+    if not df_export.empty:
+        df_ratings = load_user_ratings(user_name)
+        if not df_ratings.empty:
+            my_ratings = df_ratings[["ncode", "rating", "comment"]].rename(
+                columns={"rating": "my_rating", "comment": "my_comment"}
+            )
+            df_export = pd.merge(df_export, my_ratings, on="ncode", how="left")
+        else:
+            df_export["my_rating"] = None
+            df_export["my_comment"] = None
 
-if "is_unclassified" in df_export.columns:
-    df_export = df_export[~df_export["is_unclassified"].fillna(True)]
-else:
-    df_export = pd.DataFrame()
+        # パッチのRating/Comment情報を反映（Flagは適用済みだが値のために再適用）
+        if "local_rating_patches" in st.session_state and st.session_state["local_rating_patches"]:
+            patches = st.session_state["local_rating_patches"]
+            for ncode, patch in patches.items():
+                if ncode in df_export["ncode"].values:
+                    idx = df_export[df_export["ncode"] == ncode].index
+                    df_export.loc[idx, "my_rating"] = patch["rating"]
+                    df_export.loc[idx, "my_comment"] = patch["comment"]
 
-if not df_export.empty:
-    df_all_ratings = load_all_ratings_table().copy()
+    if not df_export.empty:
+        df_all_ratings = load_all_ratings_table().copy()
 
     if "local_rating_patches" in st.session_state and st.session_state["local_rating_patches"]:
         patches = st.session_state["local_rating_patches"]
@@ -877,7 +913,7 @@ else:
 # ==================================================
 # リスト表示関数
 # ==================================================
-def render_novel_list(df_in, key_suffix):
+def render_novel_list(df_in, key_suffix, user_name):
     if df_in.empty:
         st.info("表示対象のデータがありません")
         return None
@@ -901,6 +937,56 @@ def render_novel_list(df_in, key_suffix):
     start_idx = (st.session_state[page_key] - 1) * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
     display_df = df_in.iloc[start_idx:end_idx].copy()
+
+    # ==================================================
+    # Hydration: 表示するページ分だけユーザー評価などの情報を付与
+    # ==================================================
+    if user_name:
+        # 1. 自分の評価をマージ
+        df_ratings = load_user_ratings(user_name)
+        if not df_ratings.empty:
+            my_ratings = df_ratings[["ncode", "rating", "comment"]].rename(
+                columns={"rating": "my_rating", "comment": "my_comment"}
+            )
+            display_df = pd.merge(display_df, my_ratings, on="ncode", how="left")
+        else:
+            display_df["my_rating"] = None
+            display_df["my_comment"] = None
+            
+        # 2. 他の人の評価（全員の評価）を生成
+        df_all_ratings_raw = load_all_ratings_table()
+        target_ncodes = display_df["ncode"].unique()
+        
+        # 表示対象のNコードに関連する評価のみ抽出
+        relevant_ratings = df_all_ratings_raw[df_all_ratings_raw["ncode"].isin(target_ncodes)]
+        
+        if not relevant_ratings.empty:
+            # 自分以外、かつ評価があるもの
+            others_df = relevant_ratings[
+                (relevant_ratings["user_name"] != user_name) & 
+                (relevant_ratings["rating"].notna()) & 
+                (relevant_ratings["rating"] != "")
+            ].copy()
+            
+            if not others_df.empty:
+                others_df["_temp_summary"] = others_df["user_name"] + ":" + others_df["rating"]
+                others_agg = others_df.groupby("ncode")["_temp_summary"].agg(" ".join).reset_index()
+                others_agg.columns = ["ncode", "other_ratings_text"]
+                display_df = pd.merge(display_df, others_agg, on="ncode", how="left")
+
+        # 3. ローカルパッチの適用（表示用）
+        if "local_rating_patches" in st.session_state and st.session_state["local_rating_patches"]:
+            patches = st.session_state["local_rating_patches"]
+            for ncode, patch in patches.items():
+                if ncode in display_df["ncode"].values:
+                    idx = display_df[display_df["ncode"] == ncode].index
+                    display_df.loc[idx, "my_rating"] = patch["rating"]
+                    display_df.loc[idx, "my_comment"] = patch["comment"]
+                    # note: classificationなどは既にapply_local_flag_patchesで処理済み
+
+    # カラムが存在しない場合の補完
+    if "my_rating" not in display_df.columns: display_df["my_rating"] = None
+    if "other_ratings_text" not in display_df.columns: display_df["other_ratings_text"] = None
 
     for col in ["general_firstup", "general_lastup"]:
         if col in display_df.columns:
@@ -1034,15 +1120,11 @@ def render_novel_list(df_in, key_suffix):
 # タブによるリスト切り替え
 # ==================================================
 def get_filtered_sorted_data(user_name, genre, filter_netcon14, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending, firstup_from=None, firstup_to=None, lastup_from=None, lastup_to=None):
-    df_base = get_processed_novel_data(user_name)
+    # 軽量化：ユーザー固有データを含まないグローバルデータをロード
+    df = load_global_basic_data()
     
-    df = apply_local_patches(df_base, user_name)
-    
-    if df is df_base:
-        df = df.copy()
-
     # ==================================================
-    # 日付フィルタ
+    # 日付フィルタ（基本フィルタ）
     # ==================================================
     
     if "general_firstup" in df.columns:
@@ -1080,6 +1162,10 @@ def get_filtered_sorted_data(user_name, genre, filter_netcon14, search_keyword, 
         df = df[df["global_point"] >= min_global]
     if max_global is not None and max_global > 0:
         df = df[df["global_point"] < max_global]
+
+    # フラグのパッチ適用（タブ分類などの前に実施）
+    # dfは既にフィルタリングされているため、処理対象は少ない
+    df = apply_local_flag_patches(df, user_name)
 
     if sort_col and sort_col in df.columns:
         df = df.sort_values(by=sort_col, ascending=is_ascending, na_position='last')
@@ -1198,37 +1284,37 @@ def main_content(user_name):
     selected_ncode = None
 
     if current_tab == "すべて":
-        ncode = render_novel_list(df, "all")
+        ncode = render_novel_list(df, "all", user_name)
         if ncode: selected_ncode = ncode
 
     elif current_tab == "未評価":
         target = df[df["is_unclassified"]]
-        ncode = render_novel_list(target, "unclassified")
+        ncode = render_novel_list(target, "unclassified", user_name)
         if ncode: selected_ncode = ncode
 
     elif current_tab == "○／△（原作管理）":
         target = df[df["is_admin_evaluated"]]
-        ncode = render_novel_list(target, "evaluated_team")
+        ncode = render_novel_list(target, "evaluated_team", user_name)
         if ncode: selected_ncode = ncode
 
     elif current_tab == "○／△（一般編集）":
         target = df[df["is_general_evaluated"]]
-        ncode = render_novel_list(target, "evaluated_edit")
+        ncode = render_novel_list(target, "evaluated_edit", user_name)
         if ncode: selected_ncode = ncode
 
     elif current_tab == "×（原作管理）":
         target = df[df["is_admin_rejected"]]
-        ncode = render_novel_list(target, "rejected_team")
+        ncode = render_novel_list(target, "rejected_team", user_name)
         if ncode: selected_ncode = ncode
 
     elif current_tab == "×（一般編集）":
         target = df[df["is_general_rejected"]]
-        ncode = render_novel_list(target, "rejected_edit")
+        ncode = render_novel_list(target, "rejected_edit", user_name)
         if ncode: selected_ncode = ncode
 
     elif current_tab == "NG（商業化済み／原作管理判定）":
         target = df[df["is_ng"]]
-        ncode = render_novel_list(target, "ng_commercialized")
+        ncode = render_novel_list(target, "ng_commercialized", user_name)
         if ncode: selected_ncode = ncode
 
     # ==================================================
@@ -1239,10 +1325,26 @@ def main_content(user_name):
         st.info("作品を一覧から選択してください")
         return
 
-    row_df = df[df["ncode"] == selected_ncode]
+    row_df = df[df["ncode"] == selected_ncode].copy()
     if row_df.empty:
         st.error("データが見つかりません")
         return
+
+    # 詳細表示用にユーザーデータをマージ（軽量化のためここで行う）
+    df_ratings = load_user_ratings(user_name)
+    if not df_ratings.empty:
+        my_rating_row = df_ratings[df_ratings["ncode"] == selected_ncode]
+        if not my_rating_row.empty:
+            row_df["my_rating"] = my_rating_row.iloc[0]["rating"]
+            row_df["my_comment"] = my_rating_row.iloc[0]["comment"]
+    
+    # パッチ適用
+    if "local_rating_patches" in st.session_state and st.session_state["local_rating_patches"]:
+        patches = st.session_state["local_rating_patches"]
+        if selected_ncode in patches:
+            p = patches[selected_ncode]
+            row_df["my_rating"] = p["rating"]
+            row_df["my_comment"] = p["comment"]
 
     row = row_df.iloc[0]
 
