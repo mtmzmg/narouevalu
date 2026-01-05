@@ -91,7 +91,7 @@ def init_supabase():
 
 supabase = init_supabase()
 
-@st.cache_data(ttl=7200)
+@st.cache_resource(ttl=7200)
 def load_master_data():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     parquet_pattern = os.path.join(base_dir, "narou_novels_part*.parquet")
@@ -435,10 +435,12 @@ def calculate_novel_status(df_ratings):
     return result.reset_index(drop=True)
 
 
-
-@st.cache_data(ttl=900)
-def get_processed_novel_data(user_name):
-    df_master = load_master_data()
+def annotate_novel_data(df_base, user_name):
+    """
+    データフレーム(df_base)に対して、ユーザーの評価情報や全ユーザーの評価状況をマージし、
+    ステータス(classification)を付与した新しいデータフレームを返す。
+    軽量化のため、get_processed_novel_data を置き換える形で使用する。
+    """
     df_ratings = load_user_ratings(user_name)
     df_all_ratings_raw = load_all_ratings_table()
     
@@ -447,7 +449,8 @@ def get_processed_novel_data(user_name):
     evaluated_ncodes = []
 
     if not df_classification.empty:
-        df = pd.merge(df_master, df_classification, on="ncode", how="left")
+        # 左外部結合
+        df = pd.merge(df_base, df_classification, on="ncode", how="left")
         flag_cols = ["is_ng", "is_admin_evaluated", "is_admin_rejected", "is_general_evaluated", "is_general_rejected", "is_unclassified"]
         
         for col in flag_cols:
@@ -460,7 +463,7 @@ def get_processed_novel_data(user_name):
         df.loc[~df["ncode"].isin(evaluated_ncodes), "is_unclassified"] = True
         
     else:
-        df = df_master.copy()
+        df = df_base.copy()
         df["is_ng"] = False
         df["is_admin_evaluated"] = False
         df["is_admin_rejected"] = False
@@ -493,6 +496,7 @@ def get_processed_novel_data(user_name):
     if "other_ratings_text" not in df.columns:
         df["other_ratings_text"] = None
 
+    # 未分類フラグの最終確認
     if len(evaluated_ncodes) > 0:
         df.loc[~df["ncode"].isin(evaluated_ncodes), "is_unclassified"] = True
     elif df_classification.empty:
@@ -780,11 +784,23 @@ with st.sidebar.expander("ヘルプ"):
     </div>
     """, unsafe_allow_html=True)
 
-df_export_base = get_processed_novel_data(user_name)
-df_export = apply_local_patches(df_export_base, user_name)
+# エクスポート用：評価済み（ステータスあり）の作品だけを抽出して処理
+df_all_ratings_raw_export = load_all_ratings_table()
+df_classification_export = calculate_novel_status(df_all_ratings_raw_export)
 
-if "is_unclassified" in df_export.columns:
-    df_export = df_export[~df_export["is_unclassified"].fillna(True)]
+if not df_classification_export.empty:
+    evaluated_ncodes_export = df_classification_export["ncode"].unique()
+    df_export_base = df_master[df_master["ncode"].isin(evaluated_ncodes_export)].copy()
+    
+    # マージ処理（注釈付与）
+    df_export = annotate_novel_data(df_export_base, user_name)
+    df_export = apply_local_patches(df_export, user_name)
+    
+    # 未分類(unclassified)を除く
+    if "is_unclassified" in df_export.columns:
+        df_export = df_export[~df_export["is_unclassified"].fillna(True)]
+    else:
+        df_export = pd.DataFrame()
 else:
     df_export = pd.DataFrame()
 
@@ -1034,53 +1050,59 @@ def render_novel_list(df_in, key_suffix):
 # タブによるリスト切り替え
 # ==================================================
 def get_filtered_sorted_data(user_name, genre, filter_netcon14, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending, firstup_from=None, firstup_to=None, lastup_from=None, lastup_to=None):
-    df_base = get_processed_novel_data(user_name)
+    # 1. Master Data を取得 (Cached Resource: Read Only)
+    df_master = load_master_data()
     
-    df = apply_local_patches(df_base, user_name)
+    # 2. フィルタリング (Master上で処理して Subset を作成)
+    mask = pd.Series(True, index=df_master.index)
     
-    if df is df_base:
-        df = df.copy()
-
-    # ==================================================
     # 日付フィルタ
-    # ==================================================
-    
-    if "general_firstup" in df.columns:
+    if "general_firstup" in df_master.columns:
         if firstup_from is not None:
-            df = df[df["general_firstup"] >= pd.to_datetime(firstup_from)]
+            mask &= (df_master["general_firstup"] >= pd.to_datetime(firstup_from))
         if firstup_to is not None:
             ts_to = pd.to_datetime(firstup_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            df = df[df["general_firstup"] <= ts_to]
+            mask &= (df_master["general_firstup"] <= ts_to)
     
-    if "general_lastup" in df.columns:
+    if "general_lastup" in df_master.columns:
         if lastup_from is not None:
-            df = df[df["general_lastup"] >= pd.to_datetime(lastup_from)]
+            mask &= (df_master["general_lastup"] >= pd.to_datetime(lastup_from))
         if lastup_to is not None:
             ts_to = pd.to_datetime(lastup_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            df = df[df["general_lastup"] <= ts_to]
+            mask &= (df_master["general_lastup"] <= ts_to)
 
     if genre != "すべて":
-        df = df[df["genre"] == genre]
+        mask &= (df_master["genre"] == genre)
 
     if filter_netcon14:
-        if "keyword" in df.columns:
+        if "keyword" in df_master.columns:
             mask_netcon14 = (
-                df["keyword"].fillna("").astype(str).str.contains("ネトコン14", case=False, na=False) |
-                df["keyword"].fillna("").astype(str).str.contains("ネトコン１４", case=False, na=False)
+                df_master["keyword"].fillna("").astype(str).str.contains("ネトコン14", case=False, na=False) |
+                df_master["keyword"].fillna("").astype(str).str.contains("ネトコン１４", case=False, na=False)
             )
-            df = df[mask_netcon14]
-
-    if search_keyword or exclude_keyword:
-        target_ncodes = search_ncodes_by_duckdb(search_keyword, exclude_keyword)
-        
-        if target_ncodes is not None:
-            df = df[df["ncode"].isin(target_ncodes)]
+            mask &= mask_netcon14
 
     if min_global is not None and min_global > 0:
-        df = df[df["global_point"] >= min_global]
+        mask &= (df_master["global_point"] >= min_global)
     if max_global is not None and max_global > 0:
-        df = df[df["global_point"] < max_global]
+        mask &= (df_master["global_point"] < max_global)
 
+    # キーワード検索（DuckDB）
+    if search_keyword or exclude_keyword:
+        target_ncodes = search_ncodes_by_duckdb(search_keyword, exclude_keyword)
+        if target_ncodes is not None:
+            mask &= (df_master["ncode"].isin(target_ncodes))
+
+    # フィルタ適用 (コピー作成)
+    df = df_master[mask].copy()
+
+    # 3. アノテーション（評価情報の付与）を Subset に対してのみ実施
+    df = annotate_novel_data(df, user_name)
+
+    # 4. Local Patch 適用
+    df = apply_local_patches(df, user_name)
+
+    # 5. ソート
     if sort_col and sort_col in df.columns:
         df = df.sort_values(by=sort_col, ascending=is_ascending, na_position='last')
         
@@ -1373,7 +1395,7 @@ def main_content(user_name):
                 )
             
             with col_btn2:
-                btn_type = "primary" if current_my_rating == "△" else "secondary"
+                btn_type = "primary" if current_my_rating == "△" else "保留"
                 st.button(
                     "△ 保留", 
                     type=btn_type, 
