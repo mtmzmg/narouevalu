@@ -376,11 +376,13 @@ def calculate_novel_status(df_ratings):
 
 
 def annotate_novel_data(df_base, user_name):
-    # DEPRECATED: This logic is now handled in execute_search_query
     return df_base
 
 
 def apply_local_patches(df, user_name):
+    if df.empty or "ncode" not in df.columns:
+        return df
+
     if "local_rating_patches" not in st.session_state or not st.session_state["local_rating_patches"]:
         return df
 
