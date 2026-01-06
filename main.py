@@ -15,8 +15,12 @@ from st_aggrid import AgGrid, GridOptionsBuilder
 # ==================================================
 pd.set_option('future.no_silent_downcasting', True)
 
-# 非同期実行用のスレッドプール
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+# 非同期実行用のスレッドプール（リソースとしてキャッシュし、再実行時の増殖を防ぐ）
+@st.cache_resource
+def get_thread_pool():
+    return concurrent.futures.ThreadPoolExecutor(max_workers=5)
+
+executor = get_thread_pool()
 
 try:
     auth_config = st.secrets["auth"]
@@ -165,6 +169,11 @@ def sync_ratings_to_db(_conn):
             else:
                  _conn.execute("CREATE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
                  
+        del df_ratings
+        if 'df_status' in locals():
+            del df_status
+        gc.collect()
+
         return datetime.now().strftime("%H:%M:%S")
     except Exception as e:
         return None
@@ -187,7 +196,7 @@ def load_user_ratings(user_name):
     )
     return pd.DataFrame(res.data)
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, max_entries=1)
 def load_all_ratings_table():
     res = supabase.table("user_ratings").select("ncode,user_name,rating,comment,role,updated_at").execute()
     return pd.DataFrame(res.data)
