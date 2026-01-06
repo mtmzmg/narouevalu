@@ -179,7 +179,6 @@ def load_novel_story(ncode):
         return f"あらすじ取得エラー: {str(e)}"
 
 def load_user_ratings(user_name):
-    # ユーザー個人の評価データも軽量なのでキャッシュせず常に最新を取得（整合性重視）
     res = (
         supabase.table("user_ratings")
         .select("ncode,user_name,rating,comment,role,updated_at")
@@ -190,14 +189,11 @@ def load_user_ratings(user_name):
 
 @st.cache_data(ttl=120)
 def load_all_ratings_table():
-    # 一覧表示用：頻繁すぎると重くなるため3分キャッシュ。
-    # ※自分の評価はlocal_rating_patchesで即時反映されるため、操作感は損なわれません。
     res = supabase.table("user_ratings").select("ncode,user_name,rating,comment,role,updated_at").execute()
     return pd.DataFrame(res.data)
 
 def load_novel_ratings_all(ncode):
     try:
-        # 単一作品の取得は高速なのでキャッシュせず常に最新を取得
         res = (
             supabase.table("user_ratings")
             .select("user_name,rating,comment,role,updated_at")
@@ -223,7 +219,6 @@ def save_rating(ncode, user_name, rating, comment, role):
         "updated_at": get_jst_now()
     }
     
-    # UIのレスポンスを優先するため、保存はバックグラウンド（ThreadPool）で実行
     def _write_to_supabase():
         try:
             supabase.table("user_ratings").upsert(data, on_conflict="ncode,user_name").execute()
@@ -268,7 +263,6 @@ def save_comment_only(ncode, user_name, comment, role):
         "updated_at": get_jst_now()
     }
     
-    # UIのレスポンスを優先するため、保存はバックグラウンド（ThreadPool）で実行
     def _write_to_supabase():
         try:
             supabase.table("user_ratings").upsert(data, on_conflict="ncode,user_name").execute()
