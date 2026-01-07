@@ -2,9 +2,10 @@ streamlit>=1.35.0
 pandas>=2.2.3
 supabase>=1.2.0
 streamlit-aggrid
-pyarrow==17.0.0
+pyarrow==18.0.0
 duckdb
 
 # Last force reboot: Sun Jan  4 15:16:16 UTC 2026
 # Last force reboot: Sun Jan  4 15:29:02 UTC 2026
 # Last force reboot: Sun Jan  4 15:58:24 UTC 2026
+
