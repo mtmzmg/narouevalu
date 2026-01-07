@@ -6,6 +6,7 @@ import duckdb
 import glob
 import gc
 import concurrent.futures
+import io
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from st_aggrid import AgGrid, GridOptionsBuilder
@@ -644,9 +645,11 @@ with st.sidebar.expander("ヘルプ"):
     </div>
     """, unsafe_allow_html=True)
 
-if st.sidebar.button("評価済みリストをCSV出力"):
+# エクスポート用：評価済み（ステータスあり）の作品だけを抽出して処理
+if st.sidebar.button("評価済みリストをExcel出力"):
     try:
-        with st.spinner("CSV作成中..."):
+        with st.spinner("Excel作成中..."):
+            # DuckDBから評価済みデータを結合して取得
             export_query = """
                 SELECT 
                     t1.ncode as "Nコード",
@@ -683,27 +686,48 @@ if st.sidebar.button("評価済みリストをCSV出力"):
             df_export = conn.execute(export_query).df()
             
             if not df_export.empty:
+                # ジャンルID変換
                 df_export["ジャンル"] = df_export["ジャンル"].astype(str).map(GENRE_MAP).fillna(df_export["ジャンル"])
                 
-                csv_str = df_export.to_csv(index=False)
-                csv_bytes = csv_str.encode('utf-8-sig')
+                # Excel出力
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df_export.to_excel(writer, index=False, sheet_name='Sheet1')
+                    worksheet = writer.sheets['Sheet1']
+                    
+                    # カラム幅設定
+                    worksheet.set_column('A:A', 8.75)   # Nコード
+                    worksheet.set_column('B:B', 40)     # タイトル
+                    worksheet.set_column('C:C', 13)     # 著者名
+                    worksheet.set_column('D:D', 20)     # ジャンル
+                    worksheet.set_column('E:E', 10.75)  # 初回掲載日
+                    worksheet.set_column('F:F', 10.75)  # 最終掲載日
+                    worksheet.set_column('G:G', 6)      # 話数
+                    worksheet.set_column('H:H', 8.5)    # 文字数
+                    worksheet.set_column('I:I', 16.5)   # 総合評価ポイント
+                    worksheet.set_column('J:J', 16.25)  # 評価日時
+                    worksheet.set_column('K:K', 27)     # 評価
+                    worksheet.set_column('L:L', 70)     # コメント
+
+                excel_data = output.getvalue()
                 
-                st.session_state["export_csv"] = csv_bytes
+                # session_stateに保存して再描画時も保持
+                st.session_state["export_excel"] = excel_data
                 st.session_state["export_time"] = datetime.now().strftime('%Y%m%d_%H%M%S')
             else:
                 st.sidebar.warning("評価済みの作品はありません")
-                if "export_csv" in st.session_state:
-                    del st.session_state["export_csv"]
+                if "export_excel" in st.session_state:
+                    del st.session_state["export_excel"]
 
     except Exception as e:
         st.sidebar.error(f"エクスポートエラー: {e}")
 
-if "export_csv" in st.session_state:
+if "export_excel" in st.session_state:
     st.sidebar.download_button(
         label="ダウンロード",
-        data=st.session_state["export_csv"],
-        file_name=f"reviewed_novels_{st.session_state['export_time']}.csv",
-        mime="text/csv"
+        data=st.session_state["export_excel"],
+        file_name=f"reviewed_novels_{st.session_state['export_time']}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 # ==================================================
