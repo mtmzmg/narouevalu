@@ -697,7 +697,7 @@ if st.sidebar.button("評価済みリストをExcel出力"):
                     
                     # カラム幅設定
                     worksheet.set_column('A:A', 8.75)   # Nコード
-                    worksheet.set_column('B:B', 40)     # タイトル
+                    worksheet.set_column('B:B', 75)     # タイトル
                     worksheet.set_column('C:C', 13)     # 著者名
                     worksheet.set_column('D:D', 20)     # ジャンル
                     worksheet.set_column('E:E', 10.75)  # 初回掲載日
