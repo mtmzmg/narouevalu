@@ -390,7 +390,6 @@ def apply_local_patches(df, user_name):
     patches = st.session_state["local_rating_patches"]
     df_patched = df.copy()
     
-    # 高速化: ncodeをインデックスにして検索を効率化
     df_patched.set_index("ncode", drop=False, inplace=True)
     
     df_all_ratings = load_all_ratings_table()
@@ -660,15 +659,12 @@ with st.sidebar.expander("ヘルプ"):
     </div>
     """, unsafe_allow_html=True)
 
-# エクスポート用：評価済み（ステータスあり）の作品だけを抽出して処理
 if st.sidebar.button("評価済みリストをExcel出力"):
     try:
         with st.spinner("最新データを取得してExcel作成中..."):
-            # キャッシュをクリアして最新の評価データを同期
             st.cache_data.clear()
             sync_ratings_to_db(conn)
 
-            # DuckDBから評価済みデータを結合して取得
             export_query = """
                 SELECT 
                     t1.ncode as "Nコード",
@@ -705,32 +701,28 @@ if st.sidebar.button("評価済みリストをExcel出力"):
             df_export = conn.execute(export_query).df()
             
             if not df_export.empty:
-                # ジャンルID変換
                 df_export["ジャンル"] = df_export["ジャンル"].astype(str).map(GENRE_MAP).fillna(df_export["ジャンル"])
                 
-                # Excel出力
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df_export.to_excel(writer, index=False, sheet_name='Sheet1')
                     worksheet = writer.sheets['Sheet1']
                     
-                    # カラム幅設定
-                    worksheet.set_column('A:A', 8.75)   # Nコード
-                    worksheet.set_column('B:B', 75)     # タイトル
-                    worksheet.set_column('C:C', 13)     # 著者名
-                    worksheet.set_column('D:D', 20)     # ジャンル
-                    worksheet.set_column('E:E', 10.75)  # 初回掲載日
-                    worksheet.set_column('F:F', 10.75)  # 最終掲載日
-                    worksheet.set_column('G:G', 6)      # 話数
-                    worksheet.set_column('H:H', 8.5)    # 文字数
-                    worksheet.set_column('I:I', 16.5)   # 総合評価ポイント
-                    worksheet.set_column('J:J', 16.25)  # 評価日時
-                    worksheet.set_column('K:K', 27)     # 評価
-                    worksheet.set_column('L:L', 70)     # コメント
+                    worksheet.set_column('A:A', 8.75)
+                    worksheet.set_column('B:B', 75)
+                    worksheet.set_column('C:C', 13)
+                    worksheet.set_column('D:D', 20)
+                    worksheet.set_column('E:E', 10.75)
+                    worksheet.set_column('F:F', 10.75)
+                    worksheet.set_column('G:G', 6)
+                    worksheet.set_column('H:H', 8.5)
+                    worksheet.set_column('I:I', 16.5)
+                    worksheet.set_column('J:J', 16.25)
+                    worksheet.set_column('K:K', 27)
+                    worksheet.set_column('L:L', 70)
 
                 excel_data = output.getvalue()
                 
-                # session_stateに保存して再描画時も保持
                 st.session_state["export_excel"] = excel_data
                 st.session_state["export_time"] = datetime.now().strftime('%Y%m%d_%H%M%S')
             else:
@@ -850,7 +842,8 @@ def render_novel_list(df_in, total_count, key_suffix, page, page_size):
             return selected[0].get('ncode')
     return None
 
-def execute_search_query(conn, user_name, genre_label, filter_netcon14, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending, firstup_from, firstup_to, lastup_from, lastup_to, tab_filter, page, page_size):
+@st.cache_data(ttl=600)
+def execute_search_query(_conn, _sync_timestamp, user_name, genre_label, filter_netcon14, search_keyword, exclude_keyword, min_global, max_global, sort_col, is_ascending, firstup_from, firstup_to, lastup_from, lastup_to, tab_filter, page, page_size):
     params = []
     params.append(user_name)
 
@@ -945,7 +938,7 @@ def execute_search_query(conn, user_name, genre_label, filter_netcon14, search_k
 
     count_sql = f"SELECT COUNT(*) FROM ({query_select}) AS sub"
     try:
-        total_count = conn.execute(count_sql, params).fetchone()[0]
+        total_count = _conn.execute(count_sql, params).fetchone()[0]
     except Exception as e:
         return pd.DataFrame(), 0
 
@@ -962,7 +955,7 @@ def execute_search_query(conn, user_name, genre_label, filter_netcon14, search_k
         query_select += f" LIMIT {page_size} OFFSET {offset}"
         
     try:
-        df = conn.execute(query_select, params).df()
+        df = _conn.execute(query_select, params).df()
     except Exception as e:
         st.error(f"Query Error: {e}")
         return pd.DataFrame(), 0
@@ -1091,6 +1084,7 @@ def main_content(user_name):
 
     df, total_count = execute_search_query(
         conn,
+        sync_status,
         user_name, 
         genre, 
         filter_netcon14, 
