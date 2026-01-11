@@ -7,6 +7,7 @@ import glob
 import gc
 import concurrent.futures
 import io
+import threading
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 from st_aggrid import AgGrid, GridOptionsBuilder
@@ -15,6 +16,8 @@ from st_aggrid import AgGrid, GridOptionsBuilder
 # 定数定義
 # ==================================================
 pd.set_option('future.no_silent_downcasting', True)
+
+db_lock = threading.Lock()
 
 @st.cache_resource
 def get_thread_pool():
@@ -106,7 +109,6 @@ def get_db_connection():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     parquet_pattern = os.path.join(base_dir, "narou_novels_part*.parquet")
     
-    import glob
     parquet_files = glob.glob(parquet_pattern)
     if not parquet_files:
         st.error(f"データファイルが見つかりません: {parquet_pattern}")
@@ -147,35 +149,35 @@ def get_db_connection():
 
 @st.cache_data(ttl=300)
 def sync_ratings_to_db(_conn):
-    try:
-        df_ratings = load_all_ratings_table()
-        
-        # テーブル削除は行わず、CREATE OR REPLACEを使用することでアトミック性を高める
-
-        if df_ratings.empty:
-            _conn.execute("CREATE OR REPLACE TABLE user_ratings_raw (ncode VARCHAR, user_name VARCHAR, rating VARCHAR, comment VARCHAR, role VARCHAR, updated_at VARCHAR)")
-            _conn.execute("CREATE OR REPLACE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
-        else:
-            _conn.register('temp_ratings_source', df_ratings)
-            _conn.execute("CREATE OR REPLACE TABLE user_ratings_raw AS SELECT * FROM temp_ratings_source")
-            _conn.unregister('temp_ratings_source')
+    with db_lock:
+        try:
+            df_ratings = load_all_ratings_table()
             
-            df_status = calculate_novel_status(df_ratings)
-            if not df_status.empty:
-                _conn.register('temp_status_source', df_status)
-                _conn.execute("CREATE OR REPLACE TABLE novel_status AS SELECT * FROM temp_status_source")
-                _conn.unregister('temp_status_source')
+            if df_ratings.empty:
+                _conn.execute("CREATE OR REPLACE TABLE user_ratings_raw (ncode VARCHAR, user_name VARCHAR, rating VARCHAR, comment VARCHAR, role VARCHAR, updated_at VARCHAR)")
+                _conn.execute("CREATE OR REPLACE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
             else:
-                 _conn.execute("CREATE OR REPLACE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
-                 
-        del df_ratings
-        if 'df_status' in locals():
-            del df_status
-        gc.collect()
+                _conn.register('temp_ratings_source', df_ratings)
+                _conn.execute("CREATE OR REPLACE TABLE user_ratings_raw AS SELECT * FROM temp_ratings_source")
+                _conn.unregister('temp_ratings_source')
+                
+                df_status = calculate_novel_status(df_ratings)
+                if not df_status.empty:
+                    _conn.register('temp_status_source', df_status)
+                    _conn.execute("CREATE OR REPLACE TABLE novel_status AS SELECT * FROM temp_status_source")
+                    _conn.unregister('temp_status_source')
+                else:
+                     _conn.execute("CREATE OR REPLACE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
+                     
+            del df_ratings
+            if 'df_status' in locals():
+                del df_status
+            gc.collect()
 
-        return datetime.now().strftime("%H:%M:%S")
-    except Exception as e:
-        return None
+            return datetime.now().strftime("%H:%M:%S")
+        except Exception as e:
+            print(f"Sync error: {e}")
+            return None
 
 def load_novel_story(ncode):
     conn = get_db_connection()
@@ -578,7 +580,7 @@ if st.session_state.get("data_loaded", False):
 else:
     if "sort_order" not in st.session_state:
         st.session_state["sort_order"] = "降順"
-    sort_order = st.session_state["sort_order"]          
+    sort_order = st.session_state["sort_order"]           
 
 # ==================================================
 # フィルタ
@@ -697,7 +699,8 @@ if st.sidebar.button("評価済みリストをExcel出力"):
                     t1.general_all_no, t1.length, t1.global_point
                 ORDER BY MAX(try_cast(t3.updated_at as TIMESTAMP)) ASC
             """
-            df_export = conn.execute(export_query).df()
+            with db_lock:
+                 df_export = conn.execute(export_query).df()
             
             if not df_export.empty:
                 df_export["ジャンル"] = df_export["ジャンル"].astype(str).map(GENRE_MAP).fillna(df_export["ジャンル"])
@@ -937,17 +940,16 @@ def execute_search_query(_conn, _sync_timestamp, user_name, genre_label, filter_
 
     count_sql = f"SELECT COUNT(*) FROM ({query_select}) AS sub"
     
-    # Concurrency fix: Use a cursor instead of the shared connection directly
-    cur = _conn.cursor()
-    try:
-        cur.execute(count_sql, params)
-        res = cur.fetchone()
-        if res is None:
-             # キャッシュ汚染を防ぐため例外を投げる
-             raise ValueError("Count query failed to return a result.")
-        total_count = res[0]
-    finally:
-        cur.close()
+    with db_lock:
+        cur = _conn.cursor()
+        try:
+            cur.execute(count_sql, params)
+            res = cur.fetchone()
+            if res is None:
+                 raise ValueError("Count query failed to return a result.")
+            total_count = res[0]
+        finally:
+            cur.close()
 
     if sort_col:
         safe_cols = ["global_point", "daily_point", "novelupdated_at", "ncode", "title", "writer", "genre", "general_firstup", "general_lastup", "general_all_no", "weekly_unique"]
@@ -961,13 +963,13 @@ def execute_search_query(_conn, _sync_timestamp, user_name, genre_label, filter_
         offset = (page - 1) * page_size
         query_select += f" LIMIT {page_size} OFFSET {offset}"
         
-    # Concurrency fix: Use a cursor
-    cur = _conn.cursor()
-    try:
-        cur.execute(query_select, params)
-        df = cur.df()
-    finally:
-        cur.close()
+    with db_lock:
+        cur = _conn.cursor()
+        try:
+            cur.execute(query_select, params)
+            df = cur.df()
+        finally:
+            cur.close()
         
     if df.empty:
         return df, total_count
