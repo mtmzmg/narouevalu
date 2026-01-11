@@ -150,24 +150,23 @@ def sync_ratings_to_db(_conn):
     try:
         df_ratings = load_all_ratings_table()
         
-        _conn.execute("DROP TABLE IF EXISTS user_ratings_raw")
-        _conn.execute("DROP TABLE IF EXISTS novel_status")
+        # テーブル削除は行わず、CREATE OR REPLACEを使用することでアトミック性を高める
 
         if df_ratings.empty:
-            _conn.execute("CREATE TABLE user_ratings_raw (ncode VARCHAR, user_name VARCHAR, rating VARCHAR, comment VARCHAR, role VARCHAR, updated_at VARCHAR)")
-            _conn.execute("CREATE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
+            _conn.execute("CREATE OR REPLACE TABLE user_ratings_raw (ncode VARCHAR, user_name VARCHAR, rating VARCHAR, comment VARCHAR, role VARCHAR, updated_at VARCHAR)")
+            _conn.execute("CREATE OR REPLACE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
         else:
             _conn.register('temp_ratings_source', df_ratings)
-            _conn.execute("CREATE TABLE user_ratings_raw AS SELECT * FROM temp_ratings_source")
+            _conn.execute("CREATE OR REPLACE TABLE user_ratings_raw AS SELECT * FROM temp_ratings_source")
             _conn.unregister('temp_ratings_source')
             
             df_status = calculate_novel_status(df_ratings)
             if not df_status.empty:
                 _conn.register('temp_status_source', df_status)
-                _conn.execute("CREATE TABLE novel_status AS SELECT * FROM temp_status_source")
+                _conn.execute("CREATE OR REPLACE TABLE novel_status AS SELECT * FROM temp_status_source")
                 _conn.unregister('temp_status_source')
             else:
-                 _conn.execute("CREATE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
+                 _conn.execute("CREATE OR REPLACE TABLE novel_status (ncode VARCHAR, is_ng BOOLEAN, is_admin_evaluated BOOLEAN, is_admin_rejected BOOLEAN, is_general_evaluated BOOLEAN, is_general_rejected BOOLEAN)")
                  
         del df_ratings
         if 'df_status' in locals():
@@ -937,10 +936,8 @@ def execute_search_query(_conn, _sync_timestamp, user_name, genre_label, filter_
         query_select += " AND t2.is_ng = TRUE"
 
     count_sql = f"SELECT COUNT(*) FROM ({query_select}) AS sub"
-    try:
-        total_count = _conn.execute(count_sql, params).fetchone()[0]
-    except Exception as e:
-        return pd.DataFrame(), 0
+    # エラー時はキャッシュさせないため try-except を外す
+    total_count = _conn.execute(count_sql, params).fetchone()[0]
 
     if sort_col:
         safe_cols = ["global_point", "daily_point", "novelupdated_at", "ncode", "title", "writer", "genre", "general_firstup", "general_lastup", "general_all_no", "weekly_unique"]
@@ -954,11 +951,8 @@ def execute_search_query(_conn, _sync_timestamp, user_name, genre_label, filter_
         offset = (page - 1) * page_size
         query_select += f" LIMIT {page_size} OFFSET {offset}"
         
-    try:
-        df = _conn.execute(query_select, params).df()
-    except Exception as e:
-        st.error(f"Query Error: {e}")
-        return pd.DataFrame(), 0
+    # エラー時はキャッシュさせないため try-except を外す
+    df = _conn.execute(query_select, params).df()
         
     if df.empty:
         return df, total_count
