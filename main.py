@@ -936,8 +936,18 @@ def execute_search_query(_conn, _sync_timestamp, user_name, genre_label, filter_
         query_select += " AND t2.is_ng = TRUE"
 
     count_sql = f"SELECT COUNT(*) FROM ({query_select}) AS sub"
-    # エラー時はキャッシュさせないため try-except を外す
-    total_count = _conn.execute(count_sql, params).fetchone()[0]
+    
+    # Concurrency fix: Use a cursor instead of the shared connection directly
+    cur = _conn.cursor()
+    try:
+        cur.execute(count_sql, params)
+        res = cur.fetchone()
+        if res is None:
+             # キャッシュ汚染を防ぐため例外を投げる
+             raise ValueError("Count query failed to return a result.")
+        total_count = res[0]
+    finally:
+        cur.close()
 
     if sort_col:
         safe_cols = ["global_point", "daily_point", "novelupdated_at", "ncode", "title", "writer", "genre", "general_firstup", "general_lastup", "general_all_no", "weekly_unique"]
@@ -951,8 +961,13 @@ def execute_search_query(_conn, _sync_timestamp, user_name, genre_label, filter_
         offset = (page - 1) * page_size
         query_select += f" LIMIT {page_size} OFFSET {offset}"
         
-    # エラー時はキャッシュさせないため try-except を外す
-    df = _conn.execute(query_select, params).df()
+    # Concurrency fix: Use a cursor
+    cur = _conn.cursor()
+    try:
+        cur.execute(query_select, params)
+        df = cur.df()
+    finally:
+        cur.close()
         
     if df.empty:
         return df, total_count
