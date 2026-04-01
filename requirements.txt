@@ -1,5 +1,5 @@
 streamlit>=1.37.0
-pandas>=2.2.3
+pandas==2.2.3
 supabase>=1.2.0
 streamlit-aggrid
 pyarrow==18.0.0
